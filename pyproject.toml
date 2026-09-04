@@ -1,0 +1,38 @@
+[project]
+name = "generativeai"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Abhishek Verma", email = "abhishekverma2289@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "chromadb>=1.5.9",
+    "fastapi>=0.141.1",
+    "google-genai>=2.22.0",
+    "groq>=1.7.0",
+    "httpx>=0.28.1",
+    "huggingface-hub>=1.30.0",
+    "langchain>=1.4.0",
+    "langchain-chroma>=1.1.0",
+    "langchain-community>=0.4.2",
+    "langchain-huggingface>=1.2.2",
+    "langchain-mistralai>=1.1.6",
+    "langchain-ollama>=1.1.0",
+    "langchain-openai>=1.6.0",
+    "langchain-text-splitters>=1.1.2",
+    "mistralai>=2.9.4",
+    "pypdf>=6.17.0",
+    "python-dotenv>=1.2.3",
+    "python-multipart>=0.0.32",
+    "sentence-transformers>=6.0.1",
+    "uvicorn>=0.52.4",
+]
+
+[project.scripts]
+generativeai = "generativeai:main"
+
+[build-system]
+requires = ["uv_build>=0.12.9,<0.13.0"]
+build-backend = "uv_build"

@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+    <meta charset="UTF-8">
+
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>AI Memory Assistant</title>
+
+    <link rel="stylesheet" href="style.css">
+
+
+    <!-- =====================================================
+         HIGHLIGHT.JS
+         Syntax Highlighting
+    ====================================================== -->
+
+    <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/github-dark.min.css">
+
+</head>
+
+
+<body>
+
+
+    <div class="app">
+
+
+        <!-- =====================================================
+             SIDEBAR
+        ====================================================== -->
+
+        <aside class="sidebar">
+
+
+            <!-- Logo -->
+
+            <div class="sidebar-header">
+
+                <div class="logo">
+                    🤖
+                </div>
+
+                <div>
+
+                    <h2>
+                        AI Assistant
+                    </h2>
+
+                    <span>
+                        Memory + RAG
+                    </span>
+
+                </div>
+
+            </div>
+
+
+            <!-- New Chat -->
+
+            <button id="newChatBtn" class="new-chat-btn" type="button">
+
+                <span>
+                    ＋
+                </span>
+
+                New Chat
+
+            </button>
+
+
+            <!-- Chat History -->
+
+            <div class="sidebar-section">
+
+                <h3>
+                    💬 Conversations
+                </h3>
+
+
+                <div id="chatHistory" class="chat-history">
+
+                    <p class="empty-history">
+                        No conversations yet
+                    </p>
+
+                </div>
+
+            </div>
+
+
+            <!-- Documents -->
+
+            <div class="sidebar-section documents-section">
+
+                <h3>
+                    📄 Documents
+                </h3>
+
+
+                <input type="file" id="pdfInput" accept=".pdf" hidden>
+
+
+                <button id="uploadBtn" class="upload-btn" type="button">
+
+                    📤 Upload PDF
+
+                </button>
+
+
+                <p id="uploadStatus"></p>
+
+
+                <div id="documentList" class="document-list">
+
+                </div>
+
+            </div>
+
+
+            <!-- Features -->
+
+            <div class="sidebar-section features">
+
+                <h3>
+                    Features
+                </h3>
+
+
+                <p>
+                    🧠 Long-Term Memory
+                </p>
+
+
+                <p>
+                    📚 PDF Knowledge
+                </p>
+
+
+                <p>
+                    💬 Chat History
+                </p>
+
+
+                <p>
+                    ⚡ AI Assistant
+                </p>
+
+            </div>
+
+
+            <!-- Footer -->
+
+            <div class="sidebar-footer">
+
+                <span>
+                    AI Memory Assistant
+                </span>
+
+                <small>
+                    v1.0
+                </small>
+
+            </div>
+
+        </aside>
+
+
+        <!-- =====================================================
+             MAIN CHAT
+        ====================================================== -->
+
+        <main class="chat-container">
+
+
+            <!-- Header -->
+
+            <header class="chat-header">
+
+
+                <div class="header-info">
+
+                    <div class="bot-avatar">
+                        🤖
+                    </div>
+
+
+                    <div>
+
+                        <h1>
+                            AI Memory Assistant
+                        </h1>
+
+
+                        <span id="status">
+                            ● Online
+                        </span>
+
+                    </div>
+
+                </div>
+
+
+                <!-- Header Actions -->
+
+                <div class="header-actions">
+
+
+                    <button id="memoryBtn" type="button" title="Memory">
+
+                        🧠
+
+                    </button>
+
+
+                    <button id="clearBtn" type="button" title="Clear chat">
+
+                        🗑️
+
+                    </button>
+
+                </div>
+
+            </header>
+
+
+            <!-- =================================================
+                 CHAT MESSAGES
+            ================================================== -->
+
+            <div id="chatMessages" class="chat-messages">
+
+
+                <!-- Welcome Screen -->
+
+                <div class="welcome-screen">
+
+
+                    <div class="welcome-icon">
+                        🤖
+                    </div>
+
+
+                    <h2>
+                        How can I help you?
+                    </h2>
+
+
+                    <p>
+                        I can remember information,
+                        answer questions and search
+                        your uploaded documents.
+                    </p>
+
+
+                    <!-- Suggestions -->
+
+                    <div class="suggestions">
+
+
+                        <button class="suggestion" type="button">
+
+                            What is machine learning?
+
+                        </button>
+
+
+                        <button class="suggestion" type="button">
+
+                            Explain Python
+
+                        </button>
+
+
+                        <button class="suggestion" type="button">
+
+                            What do you remember about me?
+
+                        </button>
+
+                    </div>
+
+                </div>
+
+            </div>
+
+
+            <!-- =================================================
+                 INPUT AREA
+            ================================================== -->
+
+            <div class="input-wrapper">
+
+
+                <div class="input-area">
+
+
+                    <textarea id="userInput" placeholder="Message AI Assistant..." rows="1"></textarea>
+
+
+                    <!-- Send -->
+
+                    <button id="sendBtn" class="send-btn" type="button" title="Send message">
+
+                        ➤
+
+                    </button>
+
+
+                    <!-- Stop Generating -->
+
+                    <button id="stopBtn" class="stop-btn hidden" type="button" title="Stop generating">
+
+                        ■
+
+                    </button>
+
+                </div>
+
+
+                <!-- Input Information -->
+
+                <div class="input-info">
+
+
+                    <span>
+                        Enter to send • Shift + Enter for new line
+                    </span>
+
+
+                    <span>
+                        Powered by DeepSeek-R1
+                    </span>
+
+                </div>
+
+            </div>
+
+        </main>
+
+
+        <!-- =====================================================
+             MEMORY PANEL
+        ====================================================== -->
+
+        <aside id="memoryPanel" class="memory-panel hidden">
+
+
+            <!-- Memory Header -->
+
+            <div class="memory-header">
+
+
+                <h2>
+                    🧠 Memory
+                </h2>
+
+
+                <button id="closeMemoryBtn" type="button" title="Close">
+
+                    ✕
+
+                </button>
+
+            </div>
+
+
+            <!-- Memory Content -->
+
+            <div id="memoryContent" class="memory-content">
+
+
+                <p>
+                    Loading memory...
+                </p>
+
+            </div>
+
+        </aside>
+
+    </div>
+
+
+    <!-- =========================================================
+         HIGHLIGHT.JS
+    ========================================================== -->
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js">
+    </script>
+
+
+    <!-- Python -->
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/languages/python.min.js">
+    </script>
+
+
+    <!-- JavaScript -->
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/languages/javascript.min.js">
+    </script>
+
+
+    <!-- SQL -->
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/languages/sql.min.js">
+    </script>
+
+
+    <!-- HTML -->
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/languages/xml.min.js">
+    </script>
+
+
+    <!-- CSS -->
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/languages/css.min.js">
+    </script>
+
+
+    <!-- JSON -->
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/languages/json.min.js">
+    </script>
+
+
+    <!-- =========================================================
+         MAIN JAVASCRIPT
+    ========================================================== -->
+
+    <script src="script.js"></script>
+
+
+</body>
+
+</html>

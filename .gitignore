@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+
+.env
+
+chat_memory.db
+
+chroma_db_v2/
+chroma_documents_v2/
+
+documents/
+
+.vscode/
