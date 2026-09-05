@@ -1,9 +1,9 @@
 from pathlib import Path
+import os
 from datetime import datetime
 import sqlite3
 import hashlib
 import re
-import os
 
 from dotenv import load_dotenv
 
@@ -25,8 +25,6 @@ from langchain_core.messages import (
     AIMessage
 )
 
-from langchain_huggingface import HuggingFaceEndpointEmbeddings
-from langchain_chroma import Chroma
 
 from langchain_text_splitters import (
     RecursiveCharacterTextSplitter
@@ -142,7 +140,8 @@ connection.commit()
 llm = HuggingFaceEndpoint(
     repo_id="deepseek-ai/DeepSeek-R1",
     max_new_tokens=150,
-    temperature=0.3
+    temperature=0.3,
+    huggingfacehub_api_token=HF_TOKEN
 )
 
 
@@ -152,55 +151,84 @@ model = ChatHuggingFace(
 
 
 # ============================================================
-# EMBEDDINGS
+# REMOTE EMBEDDINGS - LAZY LOADED
 # ============================================================
 
-HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN")
-
-if not HF_TOKEN:
-    raise RuntimeError(
-        "Hugging Face token not found. "
-        "Set HF_TOKEN in Render Environment Variables."
-    )
-
-# Hugging Face integrations look for this standard environment variable.
-# The embedding model runs remotely instead of loading PyTorch/SentenceTransformers
-# inside the 512 MB Render container.
-os.environ["HUGGINGFACEHUB_API_TOKEN"] = HF_TOKEN
-
-embeddings = HuggingFaceEndpointEmbeddings(
-    model="sentence-transformers/all-MiniLM-L6-v2"
+HF_TOKEN = (
+    os.getenv("HF_TOKEN")
+    or os.getenv("HUGGINGFACEHUB_API_TOKEN")
 )
 
+if HF_TOKEN:
+    os.environ["HUGGINGFACEHUB_API_TOKEN"] = HF_TOKEN
+
+
+_embeddings = None
+_memory_store = None
+_document_store = None
+
+
+def get_embeddings():
+    global _embeddings
+
+    if _embeddings is None:
+        if not HF_TOKEN:
+            raise RuntimeError(
+                "Hugging Face token not found. "
+                "Add HF_TOKEN in Render Environment Variables."
+            )
+
+        from langchain_huggingface import (
+            HuggingFaceEndpointEmbeddings
+        )
+
+        _embeddings = HuggingFaceEndpointEmbeddings(
+            model="sentence-transformers/all-MiniLM-L6-v2"
+        )
+
+    return _embeddings
+
 
 # ============================================================
-# LONG TERM MEMORY
+# LONG TERM MEMORY - LAZY LOADED
 # ============================================================
 
-memory_store = Chroma(
-    collection_name="smart_long_term_memory",
+def get_memory_store():
+    global _memory_store
 
-    embedding_function=embeddings,
+    if _memory_store is None:
+        from langchain_chroma import Chroma
 
-    persist_directory=str(
-        BASE_DIR / "chroma_db_v2"
-    )
-)
+        _memory_store = Chroma(
+            collection_name="smart_long_term_memory",
+            embedding_function=get_embeddings(),
+            persist_directory=str(
+                BASE_DIR / "chroma_db_v2"
+            )
+        )
+
+    return _memory_store
 
 
 # ============================================================
-# DOCUMENT VECTOR STORE
+# DOCUMENT VECTOR STORE - LAZY LOADED
 # ============================================================
 
-document_store = Chroma(
-    collection_name="document_knowledge_v2",
+def get_document_store():
+    global _document_store
 
-    embedding_function=embeddings,
+    if _document_store is None:
+        from langchain_chroma import Chroma
 
-    persist_directory=str(
-        BASE_DIR / "chroma_documents_v2"
-    )
-)
+        _document_store = Chroma(
+            collection_name="document_knowledge_v2",
+            embedding_function=get_embeddings(),
+            persist_directory=str(
+                BASE_DIR / "chroma_documents_v2"
+            )
+        )
+
+    return _document_store
 
 
 # ============================================================
@@ -804,7 +832,7 @@ def save_smart_memory(
 
     memory_id = cursor.lastrowid
 
-    memory_store.add_texts(
+    get_memory_store().add_texts(
         [content],
 
         metadatas=[
@@ -836,7 +864,7 @@ def search_memory(
 
     try:
 
-        results = memory_store.similarity_search(
+        results = get_memory_store().similarity_search(
             query,
             k=k
         )
@@ -983,7 +1011,7 @@ def delete_document_chunks(
 
     try:
 
-        data = document_store.get(
+        data = get_document_store().get(
             where={
                 "source": filename
             }
@@ -996,7 +1024,7 @@ def delete_document_chunks(
 
         if ids:
 
-            document_store.delete(
+            get_document_store().delete(
                 ids=ids
             )
 
@@ -1116,7 +1144,7 @@ def index_pdf(
 
     if chunks:
 
-        document_store.add_texts(
+        get_document_store().add_texts(
 
             texts=chunks,
 
@@ -1192,7 +1220,7 @@ def search_documents(
     try:
 
         results = (
-            document_store
+            get_document_store()
             .similarity_search_with_relevance_scores(
                 query,
                 k=k
@@ -1646,7 +1674,7 @@ def run_terminal_chatbot():
 
                 try:
 
-                    memory_store.delete(
+                    get_memory_store().delete(
                         ids=[
                             f"memory_{memory_id}"
                         ]
