@@ -3,6 +3,7 @@ from datetime import datetime
 import sqlite3
 import hashlib
 import re
+import os
 
 from dotenv import load_dotenv
 
@@ -24,7 +25,7 @@ from langchain_core.messages import (
     AIMessage
 )
 
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEndpointEmbeddings
 from langchain_chroma import Chroma
 
 from langchain_text_splitters import (
@@ -154,8 +155,21 @@ model = ChatHuggingFace(
 # EMBEDDINGS
 # ============================================================
 
-embeddings = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2"
+HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN")
+
+if not HF_TOKEN:
+    raise RuntimeError(
+        "Hugging Face token not found. "
+        "Set HF_TOKEN in Render Environment Variables."
+    )
+
+# Hugging Face integrations look for this standard environment variable.
+# The embedding model runs remotely instead of loading PyTorch/SentenceTransformers
+# inside the 512 MB Render container.
+os.environ["HUGGINGFACEHUB_API_TOKEN"] = HF_TOKEN
+
+embeddings = HuggingFaceEndpointEmbeddings(
+    model="sentence-transformers/all-MiniLM-L6-v2"
 )
 
 
