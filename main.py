@@ -11,7 +11,25 @@ load_dotenv()
 
 
 # ============================================================
-# LLM
+# HUGGING FACE TOKEN
+# ============================================================
+
+HF_TOKEN = (
+    os.getenv("HF_TOKEN")
+    or os.getenv("HUGGINGFACEHUB_API_TOKEN")
+)
+
+if not HF_TOKEN:
+    print(
+        "WARNING: HF_TOKEN is not configured. "
+        "Add HF_TOKEN in Render Environment Variables."
+    )
+else:
+    os.environ["HUGGINGFACEHUB_API_TOKEN"] = HF_TOKEN
+
+
+# ============================================================
+# LLM IMPORTS
 # ============================================================
 
 from langchain_huggingface import (
@@ -24,7 +42,6 @@ from langchain_core.messages import (
     HumanMessage,
     AIMessage
 )
-
 
 from langchain_text_splitters import (
     RecursiveCharacterTextSplitter
@@ -40,10 +57,7 @@ from pypdf import PdfReader
 BASE_DIR = Path(__file__).resolve().parent
 
 DOCUMENT_FOLDER = BASE_DIR / "documents"
-
-DOCUMENT_FOLDER.mkdir(
-    exist_ok=True
-)
+DOCUMENT_FOLDER.mkdir(exist_ok=True)
 
 
 # ============================================================
@@ -61,7 +75,7 @@ cursor = connection.cursor()
 
 
 # ============================================================
-# OLD TABLES
+# DATABASE TABLES
 # ============================================================
 
 cursor.execute("""
@@ -72,7 +86,6 @@ CREATE TABLE IF NOT EXISTS messages (
 )
 """)
 
-
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,7 +94,6 @@ CREATE TABLE IF NOT EXISTS memories (
     created_at TEXT NOT NULL
 )
 """)
-
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS documents (
@@ -92,11 +104,6 @@ CREATE TABLE IF NOT EXISTS documents (
 )
 """)
 
-
-# ============================================================
-# CHAT SESSION TABLE
-# ============================================================
-
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS chat_sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -106,29 +113,18 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
 )
 """)
 
-
-# ============================================================
-# SESSION MESSAGE TABLE
-# ============================================================
-
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS session_messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-
     session_id INTEGER NOT NULL,
-
     role TEXT NOT NULL,
-
     content TEXT NOT NULL,
-
     created_at TEXT NOT NULL,
-
     FOREIGN KEY (session_id)
         REFERENCES chat_sessions(id)
         ON DELETE CASCADE
 )
 """)
-
 
 connection.commit()
 
@@ -137,13 +133,18 @@ connection.commit()
 # LLM
 # ============================================================
 
+if not HF_TOKEN:
+    raise RuntimeError(
+        "HF_TOKEN is missing. "
+        "Please add HF_TOKEN in Render Environment Variables."
+    )
+
 llm = HuggingFaceEndpoint(
     repo_id="deepseek-ai/DeepSeek-R1",
     max_new_tokens=150,
     temperature=0.3,
     huggingfacehub_api_token=HF_TOKEN
 )
-
 
 model = ChatHuggingFace(
     llm=llm
@@ -154,15 +155,6 @@ model = ChatHuggingFace(
 # REMOTE EMBEDDINGS - LAZY LOADED
 # ============================================================
 
-HF_TOKEN = (
-    os.getenv("HF_TOKEN")
-    or os.getenv("HUGGINGFACEHUB_API_TOKEN")
-)
-
-if HF_TOKEN:
-    os.environ["HUGGINGFACEHUB_API_TOKEN"] = HF_TOKEN
-
-
 _embeddings = None
 _memory_store = None
 _document_store = None
@@ -172,6 +164,7 @@ def get_embeddings():
     global _embeddings
 
     if _embeddings is None:
+
         if not HF_TOKEN:
             raise RuntimeError(
                 "Hugging Face token not found. "
@@ -197,6 +190,7 @@ def get_memory_store():
     global _memory_store
 
     if _memory_store is None:
+
         from langchain_chroma import Chroma
 
         _memory_store = Chroma(
@@ -218,6 +212,7 @@ def get_document_store():
     global _document_store
 
     if _document_store is None:
+
         from langchain_chroma import Chroma
 
         _document_store = Chroma(
@@ -251,10 +246,8 @@ def save_message(role, content):
         """
         INSERT INTO messages
         (role, content)
-
         VALUES (?, ?)
         """,
-
         (
             role,
             content
@@ -273,14 +266,10 @@ def load_chat_history(limit=10):
     cursor.execute(
         """
         SELECT role, content
-
         FROM messages
-
         ORDER BY id DESC
-
         LIMIT ?
         """,
-
         (limit,)
     )
 
@@ -315,9 +304,7 @@ def load_chat_history(limit=10):
 # SESSION: CREATE
 # ============================================================
 
-def create_chat_session(
-    title="New Chat"
-):
+def create_chat_session(title="New Chat"):
 
     now = datetime.now().isoformat()
 
@@ -329,10 +316,8 @@ def create_chat_session(
             created_at,
             updated_at
         )
-
         VALUES (?, ?, ?)
         """,
-
         (
             title,
             now,
@@ -349,9 +334,7 @@ def create_chat_session(
 # SESSION: GET
 # ============================================================
 
-def get_chat_session(
-    session_id
-):
+def get_chat_session(session_id):
 
     cursor.execute(
         """
@@ -360,31 +343,21 @@ def get_chat_session(
             title,
             created_at,
             updated_at
-
         FROM chat_sessions
-
         WHERE id = ?
         """,
-
-        (
-            session_id,
-        )
+        (session_id,)
     )
 
     row = cursor.fetchone()
 
     if not row:
-
         return None
 
     return {
-
         "id": row[0],
-
         "title": row[1],
-
         "created_at": row[2],
-
         "updated_at": row[3]
     }
 
@@ -402,9 +375,7 @@ def list_chat_sessions():
             title,
             created_at,
             updated_at
-
         FROM chat_sessions
-
         ORDER BY updated_at DESC
         """
     )
@@ -416,13 +387,9 @@ def list_chat_sessions():
     for row in rows:
 
         sessions.append({
-
             "id": row[0],
-
             "title": row[1],
-
             "created_at": row[2],
-
             "updated_at": row[3]
         })
 
@@ -433,15 +400,11 @@ def list_chat_sessions():
 # SESSION: UPDATE TITLE
 # ============================================================
 
-def rename_chat_session(
-    session_id,
-    title
-):
+def rename_chat_session(session_id, title):
 
     title = title.strip()
 
     if not title:
-
         title = "New Chat"
 
     now = datetime.now().isoformat()
@@ -449,14 +412,11 @@ def rename_chat_session(
     cursor.execute(
         """
         UPDATE chat_sessions
-
         SET
             title = ?,
             updated_at = ?
-
         WHERE id = ?
         """,
-
         (
             title,
             now,
@@ -466,41 +426,29 @@ def rename_chat_session(
 
     connection.commit()
 
-    return get_chat_session(
-        session_id
-    )
+    return get_chat_session(session_id)
 
 
 # ============================================================
 # SESSION: DELETE
 # ============================================================
 
-def delete_chat_session(
-    session_id
-):
+def delete_chat_session(session_id):
 
     cursor.execute(
         """
         DELETE FROM session_messages
-
         WHERE session_id = ?
         """,
-
-        (
-            session_id,
-        )
+        (session_id,)
     )
 
     cursor.execute(
         """
         DELETE FROM chat_sessions
-
         WHERE id = ?
         """,
-
-        (
-            session_id,
-        )
+        (session_id,)
     )
 
     connection.commit()
@@ -529,10 +477,8 @@ def save_session_message(
             content,
             created_at
         )
-
         VALUES (?, ?, ?, ?)
         """,
-
         (
             session_id,
             role,
@@ -544,12 +490,9 @@ def save_session_message(
     cursor.execute(
         """
         UPDATE chat_sessions
-
         SET updated_at = ?
-
         WHERE id = ?
         """,
-
         (
             now,
             session_id
@@ -573,16 +516,11 @@ def load_session_history(
         SELECT
             role,
             content
-
         FROM session_messages
-
         WHERE session_id = ?
-
         ORDER BY id DESC
-
         LIMIT ?
         """,
-
         (
             session_id,
             limit
@@ -620,20 +558,16 @@ def load_session_history(
 # AUTO CHAT TITLE
 # ============================================================
 
-def generate_chat_title(
-    message
-):
+def generate_chat_title(message):
 
     message = message.strip()
 
     if not message:
-
         return "New Chat"
 
     title = message[:40]
 
     if len(message) > 40:
-
         title += "..."
 
     return title
@@ -646,7 +580,6 @@ def generate_chat_title(
 def clean_response(text):
 
     if not text:
-
         return ""
 
     if "<think>" in text:
@@ -689,9 +622,7 @@ def clean_response(text):
 # DIRECT RESPONSE
 # ============================================================
 
-def direct_response(
-    user_input
-):
+def direct_response(user_input):
 
     text = user_input.lower().strip()
 
@@ -729,16 +660,13 @@ def direct_response(
 # MEMORY DETECTION
 # ============================================================
 
-def detect_memory(
-    user_input
-):
+def detect_memory(user_input):
 
     text = user_input.strip()
 
     lower = text.lower()
 
     # Name
-
     name_match = re.search(
         r"\bmy name is ([A-Za-z ]{2,40})",
         text,
@@ -755,7 +683,6 @@ def detect_memory(
         )
 
     # Learning
-
     learning_match = re.search(
         r"\bi am learning ([A-Za-z0-9 .,+#-]{2,100})",
         text,
@@ -772,7 +699,6 @@ def detect_memory(
         )
 
     # Preference
-
     if (
         "i prefer" in lower
         or "i like" in lower
@@ -784,7 +710,6 @@ def detect_memory(
         )
 
     # Explicit remember
-
     if (
         "remember that" in lower
         or "please remember" in lower
@@ -817,10 +742,8 @@ def save_smart_memory(
             content,
             created_at
         )
-
         VALUES (?, ?, ?)
         """,
-
         (
             memory_type,
             content,
@@ -834,17 +757,13 @@ def save_smart_memory(
 
     get_memory_store().add_texts(
         [content],
-
         metadatas=[
             {
                 "memory_id": memory_id,
-
                 "memory_type": memory_type,
-
                 "created_at": now
             }
         ],
-
         ids=[
             f"memory_{memory_id}"
         ]
@@ -864,14 +783,21 @@ def search_memory(
 
     try:
 
-        results = get_memory_store().similarity_search(
-            query,
-            k=k
+        results = (
+            get_memory_store()
+            .similarity_search(
+                query,
+                k=k
+            )
         )
 
         return results
 
-    except Exception:
+    except Exception as error:
+
+        print(
+            f"Memory search warning: {error}"
+        )
 
         return []
 
@@ -880,9 +806,7 @@ def search_memory(
 # BUILD MEMORY CONTEXT
 # ============================================================
 
-def build_memory_context(
-    user_input
-):
+def build_memory_context(user_input):
 
     lower = user_input.lower()
 
@@ -911,7 +835,6 @@ def build_memory_context(
     )
 
     if not results:
-
         return ""
 
     context_parts = []
@@ -922,18 +845,14 @@ def build_memory_context(
             f"- {doc.page_content}"
         )
 
-    return "\n".join(
-        context_parts
-    )
+    return "\n".join(context_parts)
 
 
 # ============================================================
 # DOCUMENT HASH
 # ============================================================
 
-def get_file_hash(
-    file_path
-):
+def get_file_hash(file_path):
 
     sha256 = hashlib.sha256()
 
@@ -949,7 +868,6 @@ def get_file_hash(
             )
 
             if not chunk:
-
                 break
 
             sha256.update(chunk)
@@ -961,9 +879,7 @@ def get_file_hash(
 # GET DOCUMENT
 # ============================================================
 
-def get_document(
-    filename
-):
+def get_document(filename):
 
     cursor.execute(
         """
@@ -972,31 +888,21 @@ def get_document(
             filename,
             file_hash,
             created_at
-
         FROM documents
-
         WHERE filename = ?
         """,
-
-        (
-            filename,
-        )
+        (filename,)
     )
 
     row = cursor.fetchone()
 
     if not row:
-
         return None
 
     return {
-
         "id": row[0],
-
         "filename": row[1],
-
         "file_hash": row[2],
-
         "created_at": row[3]
     }
 
@@ -1005,16 +911,17 @@ def get_document(
 # DELETE DOCUMENT CHUNKS
 # ============================================================
 
-def delete_document_chunks(
-    filename
-):
+def delete_document_chunks(filename):
 
     try:
 
-        data = get_document_store().get(
-            where={
-                "source": filename
-            }
+        data = (
+            get_document_store()
+            .get(
+                where={
+                    "source": filename
+                }
+            )
         )
 
         ids = data.get(
@@ -1028,22 +935,20 @@ def delete_document_chunks(
                 ids=ids
             )
 
-    except Exception:
+    except Exception as error:
 
-        pass
+        print(
+            f"Document vector delete warning: {error}"
+        )
 
 
 # ============================================================
 # INDEX PDF
 # ============================================================
 
-def index_pdf(
-    file_path
-):
+def index_pdf(file_path):
 
-    file_path = Path(
-        file_path
-    )
+    file_path = Path(file_path)
 
     if not file_path.exists():
 
@@ -1078,13 +983,9 @@ def index_pdf(
         cursor.execute(
             """
             DELETE FROM documents
-
             WHERE filename = ?
             """,
-
-            (
-                filename,
-            )
+            (filename,)
         )
 
         connection.commit()
@@ -1094,9 +995,7 @@ def index_pdf(
     )
 
     chunks = []
-
     metadatas = []
-
     ids = []
 
     for page_number, page in enumerate(
@@ -1107,11 +1006,12 @@ def index_pdf(
         text = page.extract_text() or ""
 
         if not text.strip():
-
             continue
 
-        page_chunks = text_splitter.split_text(
-            text
+        page_chunks = (
+            text_splitter.split_text(
+                text
+            )
         )
 
         for chunk_index, chunk in enumerate(
@@ -1124,19 +1024,15 @@ def index_pdf(
                 f"{chunk_index}"
             )
 
-            chunks.append(
-                chunk
+            chunks.append(chunk)
+
+            metadatas.append(
+                {
+                    "source": filename,
+                    "page": page_number,
+                    "chunk": chunk_index
+                }
             )
-
-            metadatas.append({
-
-                "source": filename,
-
-                "page": page_number,
-
-                "chunk": chunk_index
-
-            })
 
             ids.append(
                 chunk_id
@@ -1145,11 +1041,8 @@ def index_pdf(
     if chunks:
 
         get_document_store().add_texts(
-
             texts=chunks,
-
             metadatas=metadatas,
-
             ids=ids
         )
 
@@ -1163,10 +1056,8 @@ def index_pdf(
             file_hash,
             created_at
         )
-
         VALUES (?, ?, ?)
         """,
-
         (
             filename,
             file_hash,
@@ -1177,11 +1068,8 @@ def index_pdf(
     connection.commit()
 
     return {
-
         "status": "indexed",
-
         "filename": filename,
-
         "chunks": len(chunks)
     }
 
@@ -1196,8 +1084,12 @@ def build_knowledge_base():
 
         try:
 
-            index_pdf(
+            result = index_pdf(
                 file_path
+            )
+
+            print(
+                f"PDF: {result}"
             )
 
         except Exception as error:
@@ -1239,7 +1131,11 @@ def search_documents(
 
         return filtered
 
-    except Exception:
+    except Exception as error:
+
+        print(
+            f"Document search warning: {error}"
+        )
 
         return []
 
@@ -1248,9 +1144,7 @@ def search_documents(
 # DOCUMENT CONTEXT
 # ============================================================
 
-def build_document_context(
-    user_input
-):
+def build_document_context(user_input):
 
     results = search_documents(
         user_input,
@@ -1258,7 +1152,6 @@ def build_document_context(
     )
 
     if not results:
-
         return ""
 
     context_parts = []
@@ -1284,7 +1177,6 @@ def build_document_context(
         )
 
         context_parts.append(
-
             f"DOCUMENT RESULT {index}\n"
             f"Source: {source}\n"
             f"Page: {page}\n"
@@ -1292,7 +1184,6 @@ def build_document_context(
             f"Relevance: {score:.3f}\n"
             f"Content:\n"
             f"{doc.page_content}"
-
         )
 
     return "\n\n".join(
@@ -1304,9 +1195,7 @@ def build_document_context(
 # BUILD CONTEXT
 # ============================================================
 
-def build_context(
-    user_input
-):
+def build_context(user_input):
 
     memory_context = (
         build_memory_context(
@@ -1325,25 +1214,20 @@ def build_context(
     if memory_context:
 
         context_parts.append(
-
             "USER MEMORY\n"
             "===========\n"
             + memory_context
-
         )
 
     if document_context:
 
         context_parts.append(
-
             "DOCUMENT KNOWLEDGE\n"
             "==================\n"
             + document_context
-
         )
 
     if not context_parts:
-
         return ""
 
     return "\n\n".join(
@@ -1364,6 +1248,7 @@ def build_messages(
 You are a helpful AI assistant.
 
 GENERAL RULES:
+
 - Give clear and simple answers.
 - Explain technical topics step by step.
 - Use examples when useful.
@@ -1373,35 +1258,42 @@ GENERAL RULES:
 - Do not mention hidden reasoning or chain-of-thought.
 
 CONVERSATION RULES:
+
 - The conversation history may contain previous user and assistant messages.
 - Use previous messages when the current question depends on them.
-- Understand references such as "this", "that", "previous code", "same project", or "continue".
+- Understand references such as "this", "that", "previous code",
+  "same project", or "continue".
 - Do not repeat information unnecessarily.
 
 MEMORY RULES:
+
 - Use USER MEMORY only when it is relevant to the current question.
 - Never invent user memories.
 - If memory information is not available, simply say that you do not know.
 
 DOCUMENT RULES:
+
 - DOCUMENT KNOWLEDGE contains retrieved information from uploaded PDFs.
 - Use document information when it is relevant to the user's question.
 - Do not invent facts that are not present in the retrieved document context.
-- If the user asks something specifically about an uploaded document and the retrieved context does not contain the answer, clearly say that the available document context does not contain enough information.
-- When answering from a document, mention the source filename and page number when useful.
-- If the retrieved document information is unrelated to the question, ignore it and answer normally.
+- If the user asks something specifically about an uploaded document
+  and the retrieved context does not contain the answer, clearly say
+  that the available document context does not contain enough information.
+- When answering from a document, mention the source filename and page number
+  when useful.
+- If the retrieved document information is unrelated to the question,
+  ignore it and answer normally.
 - Do not force document information into unrelated answers.
 
 IMPORTANT:
+
 Answer the user's CURRENT question directly.
 """
 
     messages = [
-
         SystemMessage(
             content=system_prompt
         )
-
     ]
 
     # --------------------------------------------------------
@@ -1436,8 +1328,7 @@ Treat this information as reference material.
 
 ================ END RETRIEVED CONTEXT ================
 
-Use this context only when it is relevant to the current
-question.
+Use this context only when it is relevant to the current question.
 """
 
         messages.append(
@@ -1451,11 +1342,9 @@ question.
     # --------------------------------------------------------
 
     messages.append(
-
         HumanMessage(
             content=user_input
         )
-
     )
 
     return messages
@@ -1474,9 +1363,7 @@ def get_documents():
             filename,
             file_hash,
             created_at
-
         FROM documents
-
         ORDER BY id DESC
         """
     )
@@ -1487,16 +1374,14 @@ def get_documents():
 
     for row in rows:
 
-        documents.append({
-
-            "id": row[0],
-
-            "filename": row[1],
-
-            "file_hash": row[2],
-
-            "created_at": row[3]
-        })
+        documents.append(
+            {
+                "id": row[0],
+                "filename": row[1],
+                "file_hash": row[2],
+                "created_at": row[3]
+            }
+        )
 
     return documents
 
@@ -1510,9 +1395,7 @@ def list_documents():
 # REMOVE DOCUMENT
 # ============================================================
 
-def remove_document(
-    filename
-):
+def remove_document(filename):
 
     filename = Path(
         filename
@@ -1525,13 +1408,9 @@ def remove_document(
     cursor.execute(
         """
         DELETE FROM documents
-
         WHERE filename = ?
         """,
-
-        (
-            filename,
-        )
+        (filename,)
     )
 
     connection.commit()
@@ -1585,8 +1464,11 @@ def run_terminal_chatbot():
         ).strip()
 
         if not user_input:
-
             continue
+
+        # ----------------------------------------------------
+        # EXIT
+        # ----------------------------------------------------
 
         if user_input.lower() == "exit":
 
@@ -1608,9 +1490,7 @@ def run_terminal_chatbot():
                     id,
                     memory_type,
                     content
-
                 FROM memories
-
                 ORDER BY id DESC
                 """
             )
@@ -1661,13 +1541,9 @@ def run_terminal_chatbot():
                 cursor.execute(
                     """
                     DELETE FROM memories
-
                     WHERE id = ?
                     """,
-
-                    (
-                        memory_id,
-                    )
+                    (memory_id,)
                 )
 
                 connection.commit()
@@ -1681,7 +1557,6 @@ def run_terminal_chatbot():
                     )
 
                 except Exception:
-
                     pass
 
                 print(
@@ -1779,10 +1654,18 @@ def run_terminal_chatbot():
 
             memory_type, memory_content = detected
 
-            save_smart_memory(
-                memory_type,
-                memory_content
-            )
+            try:
+
+                save_smart_memory(
+                    memory_type,
+                    memory_content
+                )
+
+            except Exception as error:
+
+                print(
+                    f"Memory save warning: {error}"
+                )
 
         # ----------------------------------------------------
         # CHAT HISTORY
@@ -1854,5 +1737,4 @@ def run_terminal_chatbot():
 # ============================================================
 
 if __name__ == "__main__":
-
     run_terminal_chatbot()
