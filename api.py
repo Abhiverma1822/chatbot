@@ -42,12 +42,11 @@ BASE_DIR = Path(__file__).resolve().parent
 # ============================================================
 # ENVIRONMENT
 # ============================================================
-
 ENV_FILE = BASE_DIR / ".env"
 
 load_dotenv(ENV_FILE)
 
-HF_TOKEN = os.getenv("HF_TOKEN")
+HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN")
 
 if not HF_TOKEN:
     raise ValueError(
@@ -55,6 +54,7 @@ if not HF_TOKEN:
 HF_TOKEN is missing.
 
 Expected .env file:
+
 {ENV_FILE}
 
 Add your Hugging Face token to .env
