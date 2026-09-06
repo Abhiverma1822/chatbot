@@ -363,14 +363,23 @@ def startup_event():
 
     print()
 
-    # Initialize RAG at startup
-    get_rag_collection()
+    # ============================================================
+    # IMPORTANT:
+    # Do NOT initialize RAG at startup.
+    #
+    # get_rag_collection() loads the local embedding model
+    # (all-MiniLM-L6-v2), which can consume a lot of RAM on
+    # Render's 512 MB instance.
+    #
+    # RAG will be initialized only when it is actually needed.
+    # ============================================================
+
+    print("ℹ️ RAG initialization: Lazy loading enabled")
 
     print("=" * 70)
     print("✅ Startup completed")
     print("=" * 70)
     print()
-
 
 # ============================================================
 # TEXT CHUNKING
