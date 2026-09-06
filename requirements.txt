@@ -11,10 +11,12 @@ langchain-chroma
 langchain-text-splitters
 
 chromadb
-sentence-transformers
 
+sentence-transformers
 huggingface-hub
 transformers
-torch
+
+torch==2.6.0+cpu
+--extra-index-url https://download.pytorch.org/whl/cpu
 
 pypdf
