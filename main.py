@@ -1,53 +1,35 @@
-from pathlib import Path
+# ============================================================
+# AI ASSISTANT BACKEND
+# FastAPI + DeepSeek + SQLite + Chroma RAG + Memory
+# ============================================================
+
+from __future__ import annotations
+
 import os
-from datetime import datetime
-import sqlite3
-import hashlib
 import re
+import io
+import json
+import base64
+import sqlite3
+from pathlib import Path
+from datetime import datetime, timezone
+from uuid import uuid4
+from typing import Optional, Any, Generator
 
 from dotenv import load_dotenv
+from huggingface_hub import InferenceClient
 
-load_dotenv()
-
-
-# ============================================================
-# HUGGING FACE TOKEN
-# ============================================================
-
-HF_TOKEN = (
-    os.getenv("HF_TOKEN")
-    or os.getenv("HUGGINGFACEHUB_API_TOKEN")
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    UploadFile,
+    File,
+    Form,
 )
 
-if not HF_TOKEN:
-    print(
-        "WARNING: HF_TOKEN is not configured. "
-        "Add HF_TOKEN in Render Environment Variables."
-    )
-else:
-    os.environ["HUGGINGFACEHUB_API_TOKEN"] = HF_TOKEN
-
-
-# ============================================================
-# LLM IMPORTS
-# ============================================================
-
-from langchain_huggingface import (
-    ChatHuggingFace,
-    HuggingFaceEndpoint
-)
-
-from langchain_core.messages import (
-    SystemMessage,
-    HumanMessage,
-    AIMessage
-)
-
-from langchain_text_splitters import (
-    RecursiveCharacterTextSplitter
-)
-
-from pypdf import PdfReader
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 
 # ============================================================
@@ -56,931 +38,2349 @@ from pypdf import PdfReader
 
 BASE_DIR = Path(__file__).resolve().parent
 
-DOCUMENT_FOLDER = BASE_DIR / "documents"
-DOCUMENT_FOLDER.mkdir(exist_ok=True)
+ENV_FILE = BASE_DIR / ".env"
+
+DATA_DIR = BASE_DIR / "data"
+UPLOAD_DIR = BASE_DIR / "uploads"
+CHROMA_DIR = BASE_DIR / "chroma_db"
+
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+
+DB_PATH = DATA_DIR / "chatbot.db"
+
+load_dotenv(ENV_FILE)
 
 
 # ============================================================
-# DATABASE
+# HUGGING FACE CONFIGURATION
 # ============================================================
 
-DB_PATH = BASE_DIR / "chat_memory.db"
-
-connection = sqlite3.connect(
-    DB_PATH,
-    check_same_thread=False
+HF_TOKEN = (
+    os.getenv("HF_TOKEN")
+    or os.getenv("HUGGINGFACEHUB_API_TOKEN")
 )
-
-cursor = connection.cursor()
-
-
-# ============================================================
-# DATABASE TABLES
-# ============================================================
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    role TEXT NOT NULL,
-    content TEXT NOT NULL
-)
-""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS memories (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    memory_type TEXT NOT NULL,
-    content TEXT NOT NULL,
-    created_at TEXT NOT NULL
-)
-""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS documents (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    filename TEXT UNIQUE NOT NULL,
-    file_hash TEXT NOT NULL,
-    created_at TEXT NOT NULL
-)
-""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS chat_sessions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-)
-""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS session_messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id INTEGER NOT NULL,
-    role TEXT NOT NULL,
-    content TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    FOREIGN KEY (session_id)
-        REFERENCES chat_sessions(id)
-        ON DELETE CASCADE
-)
-""")
-
-connection.commit()
-
-
-# ============================================================
-# LLM
-# ============================================================
 
 if not HF_TOKEN:
-    raise RuntimeError(
-        "HF_TOKEN is missing. "
-        "Please add HF_TOKEN in Render Environment Variables."
+    raise ValueError(
+        f"\nHF_TOKEN is missing.\n\n"
+        f"Create this file:\n{ENV_FILE}\n\n"
+        "Add:\n"
+        "HF_TOKEN=your_new_huggingface_token\n"
     )
 
-llm = HuggingFaceEndpoint(
-    repo_id="deepseek-ai/DeepSeek-R1",
-    max_new_tokens=150,
-    temperature=0.3,
-    huggingfacehub_api_token=HF_TOKEN
+
+MODEL_NAME = os.getenv(
+    "MODEL_NAME",
+    "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp"
 )
 
-model = ChatHuggingFace(
-    llm=llm
+MAX_TOKENS = int(
+    os.getenv("MAX_TOKENS", "1024")
 )
 
-
-# ============================================================
-# REMOTE EMBEDDINGS - LAZY LOADED
-# ============================================================
-
-_embeddings = None
-_memory_store = None
-_document_store = None
-
-
-def get_embeddings():
-    global _embeddings
-
-    if _embeddings is None:
-
-        if not HF_TOKEN:
-            raise RuntimeError(
-                "Hugging Face token not found. "
-                "Add HF_TOKEN in Render Environment Variables."
-            )
-
-        from langchain_huggingface import (
-            HuggingFaceEndpointEmbeddings
-        )
-
-        _embeddings = HuggingFaceEndpointEmbeddings(
-            model="sentence-transformers/all-MiniLM-L6-v2"
-        )
-
-    return _embeddings
-
-
-# ============================================================
-# LONG TERM MEMORY - LAZY LOADED
-# ============================================================
-
-def get_memory_store():
-    global _memory_store
-
-    if _memory_store is None:
-
-        from langchain_chroma import Chroma
-
-        _memory_store = Chroma(
-            collection_name="smart_long_term_memory",
-            embedding_function=get_embeddings(),
-            persist_directory=str(
-                BASE_DIR / "chroma_db_v2"
-            )
-        )
-
-    return _memory_store
-
-
-# ============================================================
-# DOCUMENT VECTOR STORE - LAZY LOADED
-# ============================================================
-
-def get_document_store():
-    global _document_store
-
-    if _document_store is None:
-
-        from langchain_chroma import Chroma
-
-        _document_store = Chroma(
-            collection_name="document_knowledge_v2",
-            embedding_function=get_embeddings(),
-            persist_directory=str(
-                BASE_DIR / "chroma_documents_v2"
-            )
-        )
-
-    return _document_store
-
-
-# ============================================================
-# TEXT SPLITTER
-# ============================================================
-
-text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=800,
-    chunk_overlap=150
+TEMPERATURE = float(
+    os.getenv("TEMPERATURE", "0.3")
 )
 
 
 # ============================================================
-# BASIC MESSAGE SAVE
+# EMBEDDING CONFIGURATION
 # ============================================================
 
-def save_message(role, content):
+EMBEDDING_MODEL = os.getenv(
+    "EMBEDDING_MODEL",
+    "all-MiniLM-L6-v2"
+)
 
-    cursor.execute(
-        """
-        INSERT INTO messages
-        (role, content)
-        VALUES (?, ?)
-        """,
-        (
-            role,
-            content
-        )
+
+# ============================================================
+# HUGGING FACE CLIENT
+# ============================================================
+
+client = InferenceClient(
+    api_key=HF_TOKEN
+)
+
+
+# ============================================================
+# SYSTEM PROMPT
+# ============================================================
+
+SYSTEM_PROMPT = """
+You are a helpful AI assistant.
+
+Rules:
+
+- Give clear and simple answers.
+- Explain technical topics step by step.
+- Use examples when useful.
+- Keep answers relevant to the user's question.
+- If you do not know something, say so.
+- Do not invent facts.
+- When an image is provided, analyze it carefully.
+- When document context is provided, use it when relevant.
+- If the answer comes from uploaded documents, mention the
+  relevant document name when useful.
+- Do not claim that you searched the web unless web-search
+  context was actually provided.
+- Prefer practical and accurate answers.
+"""
+
+
+# ============================================================
+# FASTAPI APPLICATION
+# ============================================================
+
+app = FastAPI(
+    title="AI Assistant API",
+    description="DeepSeek AI Assistant with RAG and Memory",
+    version="2.0.0",
+)
+
+
+# ============================================================
+# CORS
+# ============================================================
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ============================================================
+# GLOBAL RAG STATE
+# ============================================================
+
+_chroma_client = None
+_rag_collection = None
+_rag_error = None
+
+
+# ============================================================
+# SQLITE
+# ============================================================
+
+def get_db() -> sqlite3.Connection:
+    conn = sqlite3.connect(
+        DB_PATH,
+        check_same_thread=False,
     )
 
-    connection.commit()
+    conn.row_factory = sqlite3.Row
 
-
-# ============================================================
-# OLD CHAT HISTORY
-# ============================================================
-
-def load_chat_history(limit=10):
-
-    cursor.execute(
-        """
-        SELECT role, content
-        FROM messages
-        ORDER BY id DESC
-        LIMIT ?
-        """,
-        (limit,)
+    conn.execute(
+        "PRAGMA foreign_keys = ON"
     )
 
-    rows = cursor.fetchall()
+    return conn
 
-    rows.reverse()
 
-    history = []
+def now_iso() -> str:
+    return datetime.now(
+        timezone.utc
+    ).isoformat()
 
-    for role, content in rows:
 
-        if role == "user":
+def init_database() -> None:
 
-            history.append(
-                HumanMessage(
-                    content=content
-                )
-            )
-
-        elif role == "assistant":
-
-            history.append(
-                AIMessage(
-                    content=content
-                )
-            )
-
-    return history
-
-
-# ============================================================
-# SESSION: CREATE
-# ============================================================
-
-def create_chat_session(title="New Chat"):
-
-    now = datetime.now().isoformat()
-
-    cursor.execute(
-        """
-        INSERT INTO chat_sessions
-        (
-            title,
-            created_at,
-            updated_at
-        )
-        VALUES (?, ?, ?)
-        """,
-        (
-            title,
-            now,
-            now
-        )
-    )
-
-    connection.commit()
-
-    return cursor.lastrowid
-
-
-# ============================================================
-# SESSION: GET
-# ============================================================
-
-def get_chat_session(session_id):
-
-    cursor.execute(
-        """
-        SELECT
-            id,
-            title,
-            created_at,
-            updated_at
-        FROM chat_sessions
-        WHERE id = ?
-        """,
-        (session_id,)
-    )
-
-    row = cursor.fetchone()
-
-    if not row:
-        return None
-
-    return {
-        "id": row[0],
-        "title": row[1],
-        "created_at": row[2],
-        "updated_at": row[3]
-    }
-
-
-# ============================================================
-# SESSION: LIST
-# ============================================================
-
-def list_chat_sessions():
-
-    cursor.execute(
-        """
-        SELECT
-            id,
-            title,
-            created_at,
-            updated_at
-        FROM chat_sessions
-        ORDER BY updated_at DESC
-        """
-    )
-
-    rows = cursor.fetchall()
-
-    sessions = []
-
-    for row in rows:
-
-        sessions.append({
-            "id": row[0],
-            "title": row[1],
-            "created_at": row[2],
-            "updated_at": row[3]
-        })
-
-    return sessions
-
-
-# ============================================================
-# SESSION: UPDATE TITLE
-# ============================================================
-
-def rename_chat_session(session_id, title):
-
-    title = title.strip()
-
-    if not title:
-        title = "New Chat"
-
-    now = datetime.now().isoformat()
-
-    cursor.execute(
-        """
-        UPDATE chat_sessions
-        SET
-            title = ?,
-            updated_at = ?
-        WHERE id = ?
-        """,
-        (
-            title,
-            now,
-            session_id
-        )
-    )
-
-    connection.commit()
-
-    return get_chat_session(session_id)
-
-
-# ============================================================
-# SESSION: DELETE
-# ============================================================
-
-def delete_chat_session(session_id):
-
-    cursor.execute(
-        """
-        DELETE FROM session_messages
-        WHERE session_id = ?
-        """,
-        (session_id,)
-    )
-
-    cursor.execute(
-        """
-        DELETE FROM chat_sessions
-        WHERE id = ?
-        """,
-        (session_id,)
-    )
-
-    connection.commit()
-
-    return True
-
-
-# ============================================================
-# SESSION MESSAGE: SAVE
-# ============================================================
-
-def save_session_message(
-    session_id,
-    role,
-    content
-):
-
-    now = datetime.now().isoformat()
-
-    cursor.execute(
-        """
-        INSERT INTO session_messages
-        (
-            session_id,
-            role,
-            content,
-            created_at
-        )
-        VALUES (?, ?, ?, ?)
-        """,
-        (
-            session_id,
-            role,
-            content,
-            now
-        )
-    )
-
-    cursor.execute(
-        """
-        UPDATE chat_sessions
-        SET updated_at = ?
-        WHERE id = ?
-        """,
-        (
-            now,
-            session_id
-        )
-    )
-
-    connection.commit()
-
-
-# ============================================================
-# SESSION MESSAGE: LOAD
-# ============================================================
-
-def load_session_history(
-    session_id,
-    limit=20
-):
-
-    cursor.execute(
-        """
-        SELECT
-            role,
-            content
-        FROM session_messages
-        WHERE session_id = ?
-        ORDER BY id DESC
-        LIMIT ?
-        """,
-        (
-            session_id,
-            limit
-        )
-    )
-
-    rows = cursor.fetchall()
-
-    rows.reverse()
-
-    history = []
-
-    for role, content in rows:
-
-        if role == "user":
-
-            history.append(
-                HumanMessage(
-                    content=content
-                )
-            )
-
-        elif role == "assistant":
-
-            history.append(
-                AIMessage(
-                    content=content
-                )
-            )
-
-    return history
-
-
-# ============================================================
-# AUTO CHAT TITLE
-# ============================================================
-
-def generate_chat_title(message):
-
-    message = message.strip()
-
-    if not message:
-        return "New Chat"
-
-    title = message[:40]
-
-    if len(message) > 40:
-        title += "..."
-
-    return title
-
-
-# ============================================================
-# CLEAN DEEPSEEK RESPONSE
-# ============================================================
-
-def clean_response(text):
-
-    if not text:
-        return ""
-
-    if "<think>" in text:
-
-        if "</think>" in text:
-
-            text = text.split(
-                "</think>",
-                1
-            )[1]
-
-        else:
-
-            text = text.replace(
-                "<think>",
-                ""
-            )
-
-    if "</think>" in text:
-
-        text = text.split(
-            "</think>",
-            1
-        )[1]
-
-    text = text.replace(
-        "<think>",
-        ""
-    )
-
-    text = text.replace(
-        "</think>",
-        ""
-    )
-
-    return text.strip()
-
-
-# ============================================================
-# DIRECT RESPONSE
-# ============================================================
-
-def direct_response(user_input):
-
-    text = user_input.lower().strip()
-
-    greetings = [
-        "hi",
-        "hello",
-        "hey",
-        "hii",
-        "hiii",
-        "good morning",
-        "good evening"
-    ]
-
-    if text in greetings:
-
-        return (
-            "Hello! 👋 "
-            "How can I help you today?"
-        )
-
-    if text in [
-        "thanks",
-        "thank you",
-        "thankyou"
-    ]:
-
-        return (
-            "You're welcome! 😊"
-        )
-
-    return None
-
-
-# ============================================================
-# MEMORY DETECTION
-# ============================================================
-
-def detect_memory(user_input):
-
-    text = user_input.strip()
-
-    lower = text.lower()
-
-    # Name
-    name_match = re.search(
-        r"\bmy name is ([A-Za-z ]{2,40})",
-        text,
-        re.IGNORECASE
-    )
-
-    if name_match:
-
-        name = name_match.group(1).strip()
-
-        return (
-            "name",
-            f"The user's name is {name}."
-        )
-
-    # Learning
-    learning_match = re.search(
-        r"\bi am learning ([A-Za-z0-9 .,+#-]{2,100})",
-        text,
-        re.IGNORECASE
-    )
-
-    if learning_match:
-
-        topic = learning_match.group(1).strip()
-
-        return (
-            "learning",
-            f"The user is learning {topic}."
-        )
-
-    # Preference
-    if (
-        "i prefer" in lower
-        or "i like" in lower
-    ):
-
-        return (
-            "preference",
-            text
-        )
-
-    # Explicit remember
-    if (
-        "remember that" in lower
-        or "please remember" in lower
-    ):
-
-        return (
-            "explicit",
-            text
-        )
-
-    return None
-
-
-# ============================================================
-# SAVE SMART MEMORY
-# ============================================================
-
-def save_smart_memory(
-    memory_type,
-    content
-):
-
-    now = datetime.now().isoformat()
-
-    cursor.execute(
-        """
-        INSERT INTO memories
-        (
-            memory_type,
-            content,
-            created_at
-        )
-        VALUES (?, ?, ?)
-        """,
-        (
-            memory_type,
-            content,
-            now
-        )
-    )
-
-    connection.commit()
-
-    memory_id = cursor.lastrowid
-
-    get_memory_store().add_texts(
-        [content],
-        metadatas=[
-            {
-                "memory_id": memory_id,
-                "memory_type": memory_type,
-                "created_at": now
-            }
-        ],
-        ids=[
-            f"memory_{memory_id}"
-        ]
-    )
-
-    return memory_id
-
-
-# ============================================================
-# SEARCH MEMORY
-# ============================================================
-
-def search_memory(
-    query,
-    k=3
-):
+    conn = get_db()
 
     try:
 
-        results = (
-            get_memory_store()
-            .similarity_search(
-                query,
-                k=k
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS chats (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL DEFAULT 'New Chat',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+
+                FOREIGN KEY(chat_id)
+                REFERENCES chats(id)
+                ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                memory_type TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename TEXT UNIQUE NOT NULL,
+                file_path TEXT NOT NULL,
+                chunks INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS complaints (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id TEXT,
+                description TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_messages_chat
+            ON messages(chat_id);
+
+            CREATE INDEX IF NOT EXISTS idx_memories_created
+            ON memories(created_at);
+
+            CREATE INDEX IF NOT EXISTS idx_chats_updated
+            ON chats(updated_at);
+
+            CREATE INDEX IF NOT EXISTS idx_complaints_created
+            ON complaints(created_at);
+            """
+        )
+
+        conn.commit()
+
+    finally:
+        conn.close()
+
+
+init_database()
+
+
+# ============================================================
+# CHROMA RAG INITIALIZATION
+# ============================================================
+
+def get_rag_collection():
+    """
+    Initialize Chroma only once.
+
+    Returns:
+        Chroma collection or None if initialization fails.
+    """
+
+    global _chroma_client
+    global _rag_collection
+    global _rag_error
+
+    if _rag_collection is not None:
+        return _rag_collection
+
+    try:
+
+        print()
+        print("📚 Initializing Chroma RAG...")
+        print(
+            f"   Chroma DB : {CHROMA_DIR}"
+        )
+        print(
+            f"   Embedding : {EMBEDDING_MODEL}"
+        )
+
+        import chromadb
+
+        from chromadb.utils.embedding_functions import (
+            SentenceTransformerEmbeddingFunction
+        )
+
+        _chroma_client = chromadb.PersistentClient(
+            path=str(CHROMA_DIR)
+        )
+
+        embedding_function = (
+            SentenceTransformerEmbeddingFunction(
+                model_name=EMBEDDING_MODEL
             )
         )
 
-        return results
+        _rag_collection = (
+            _chroma_client.get_or_create_collection(
+                name="documents",
+                embedding_function=embedding_function,
+            )
+        )
+
+        _rag_error = None
+
+        print("✅ Chroma RAG initialized successfully.")
+        print(
+            f"   Documents indexed: "
+            f"{_rag_collection.count()}"
+        )
+        print()
+
+        return _rag_collection
+
+    except Exception as error:
+
+        _rag_error = str(error)
+
+        _rag_collection = None
+
+        print()
+        print("❌ Chroma RAG initialization failed.")
+        print(f"   Error: {error}")
+        print()
+
+        return None
+
+
+# ============================================================
+# FASTAPI STARTUP
+# ============================================================
+
+@app.on_event("startup")
+def startup_event():
+
+    print()
+    print("=" * 70)
+    print("🚀 AI ASSISTANT STARTUP")
+    print("=" * 70)
+
+    print(
+        f"Model    : {MODEL_NAME}"
+    )
+
+    print(
+        f"Database : {DB_PATH}"
+    )
+
+    print(
+        f"Chroma   : {CHROMA_DIR}"
+    )
+
+    print()
+
+    # Initialize RAG at startup
+    get_rag_collection()
+
+    print("=" * 70)
+    print("✅ Startup completed")
+    print("=" * 70)
+    print()
+
+
+# ============================================================
+# TEXT CHUNKING
+# ============================================================
+
+def chunk_text(
+    text: str,
+    chunk_size: int = 1200,
+    overlap: int = 200,
+) -> list[str]:
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    ).strip()
+
+    if not text:
+        return []
+
+    chunks = []
+
+    start = 0
+
+    text_length = len(text)
+
+    while start < text_length:
+
+        end = min(
+            start + chunk_size,
+            text_length
+        )
+
+        chunk = text[
+            start:end
+        ].strip()
+
+        if chunk:
+            chunks.append(chunk)
+
+        if end >= text_length:
+            break
+
+        start = end - overlap
+
+    return chunks
+
+
+# ============================================================
+# PDF TEXT EXTRACTION
+# ============================================================
+
+def extract_pdf_text(
+    file_bytes: bytes
+) -> str:
+
+    try:
+
+        from pypdf import PdfReader
+
+        reader = PdfReader(
+            io.BytesIO(file_bytes)
+        )
+
+        pages = []
+
+        for page_number, page in enumerate(
+            reader.pages,
+            start=1
+        ):
+
+            try:
+
+                text = page.extract_text()
+
+                if text:
+
+                    pages.append(
+                        f"\n[Page {page_number}]\n{text}"
+                    )
+
+            except Exception as error:
+
+                print(
+                    f"⚠️ Could not extract page "
+                    f"{page_number}: {error}"
+                )
+
+        return "\n".join(
+            pages
+        ).strip()
+
+    except Exception as error:
+
+        raise RuntimeError(
+            f"PDF extraction failed: {error}"
+        )
+
+
+# ============================================================
+# DOCUMENT SEARCH
+# ============================================================
+
+def search_documents(
+    query: str,
+    n_results: int = 5,
+) -> list[dict]:
+
+    collection = get_rag_collection()
+
+    if collection is None:
+        return []
+
+    try:
+
+        count = collection.count()
+
+        if count == 0:
+            return []
+
+        results = collection.query(
+            query_texts=[query],
+            n_results=min(
+                n_results,
+                count
+            ),
+        )
+
+        documents = results.get(
+            "documents",
+            [[]]
+        )[0]
+
+        metadatas = results.get(
+            "metadatas",
+            [[]]
+        )[0]
+
+        output = []
+
+        for index, document in enumerate(
+            documents
+        ):
+
+            metadata = {}
+
+            if index < len(metadatas):
+
+                metadata = (
+                    metadatas[index]
+                    or {}
+                )
+
+            output.append(
+                {
+                    "text": document,
+                    "filename": metadata.get(
+                        "filename",
+                        "Unknown document"
+                    ),
+                    "chunk": metadata.get(
+                        "chunk_index",
+                        0
+                    ),
+                }
+            )
+
+        return output
 
     except Exception as error:
 
         print(
-            f"Memory search warning: {error}"
+            f"⚠️ RAG search error: {error}"
         )
 
         return []
 
 
 # ============================================================
-# BUILD MEMORY CONTEXT
+# MEMORY SYSTEM
 # ============================================================
 
-def build_memory_context(user_input):
+MEMORY_PATTERNS = [
 
-    lower = user_input.lower()
+    (
+        r"\bmy name is\b",
+        "user_fact"
+    ),
 
-    memory_keywords = [
-        "my name",
-        "what do you remember",
-        "remember me",
-        "what am i learning",
-        "my preference",
-        "about me",
-        "who am i",
-        "do you know me",
-        "what do you know about me"
-    ]
+    (
+        r"\bi am\b",
+        "user_fact"
+    ),
 
-    if not any(
-        keyword in lower
-        for keyword in memory_keywords
-    ):
+    (
+        r"\bi'm\b",
+        "user_fact"
+    ),
 
-        return ""
+    (
+        r"\bmy favorite\b",
+        "preference"
+    ),
 
-    results = search_memory(
-        user_input,
-        k=3
-    )
+    (
+        r"\bi like\b",
+        "preference"
+    ),
 
-    if not results:
-        return ""
+    (
+        r"\bi love\b",
+        "preference"
+    ),
 
-    context_parts = []
+    (
+        r"\bi prefer\b",
+        "preference"
+    ),
 
-    for doc in results:
+    (
+        r"\bi study\b",
+        "education"
+    ),
 
-        context_parts.append(
-            f"- {doc.page_content}"
-        )
+    (
+        r"\bi work\b",
+        "work"
+    ),
 
-    return "\n".join(context_parts)
+    (
+        r"\bmy goal\b",
+        "goal"
+    ),
 
+    (
+        r"\bremember that\b",
+        "explicit_memory"
+    ),
 
-# ============================================================
-# DOCUMENT HASH
-# ============================================================
-
-def get_file_hash(file_path):
-
-    sha256 = hashlib.sha256()
-
-    with open(
-        file_path,
-        "rb"
-    ) as file:
-
-        while True:
-
-            chunk = file.read(
-                1024 * 1024
-            )
-
-            if not chunk:
-                break
-
-            sha256.update(chunk)
-
-    return sha256.hexdigest()
+    (
+        r"\bremember\b",
+        "explicit_memory"
+    ),
+]
 
 
-# ============================================================
-# GET DOCUMENT
-# ============================================================
+def extract_memory(
+    text: str
+) -> Optional[tuple[str, str]]:
 
-def get_document(filename):
+    clean = text.strip()
 
-    cursor.execute(
-        """
-        SELECT
-            id,
-            filename,
-            file_hash,
-            created_at
-        FROM documents
-        WHERE filename = ?
-        """,
-        (filename,)
-    )
-
-    row = cursor.fetchone()
-
-    if not row:
+    if not clean:
         return None
 
-    return {
-        "id": row[0],
-        "filename": row[1],
-        "file_hash": row[2],
-        "created_at": row[3]
-    }
+    if len(clean) > 500:
+        return None
+
+    lower = clean.lower()
+
+    for pattern, memory_type in MEMORY_PATTERNS:
+
+        if re.search(
+            pattern,
+            lower
+        ):
+
+            return (
+                memory_type,
+                clean
+            )
+
+    return None
 
 
-# ============================================================
-# DELETE DOCUMENT CHUNKS
-# ============================================================
+def save_memory(
+    memory_type: str,
+    content: str
+):
 
-def delete_document_chunks(filename):
+    conn = get_db()
 
     try:
 
-        data = (
-            get_document_store()
-            .get(
-                where={
-                    "source": filename
+        existing = conn.execute(
+            """
+            SELECT id
+            FROM memories
+            WHERE content = ?
+            LIMIT 1
+            """,
+            (content,)
+        ).fetchone()
+
+        if existing:
+            return
+
+        conn.execute(
+            """
+            INSERT INTO memories
+            (
+                memory_type,
+                content,
+                created_at
+            )
+            VALUES (?, ?, ?)
+            """,
+            (
+                memory_type,
+                content,
+                now_iso(),
+            )
+        )
+
+        conn.commit()
+
+    finally:
+        conn.close()
+
+
+def search_memories(
+    query: str = "",
+    limit: int = 8,
+):
+
+    conn = get_db()
+
+    try:
+
+        if not query.strip():
+
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM memories
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,)
+            ).fetchall()
+
+        else:
+
+            words = [
+                word
+                for word in re.findall(
+                    r"\w+",
+                    query.lower()
+                )
+                if len(word) > 2
+            ]
+
+            if not words:
+
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM memories
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (limit,)
+                ).fetchall()
+
+            else:
+
+                conditions = []
+                values = []
+
+                for word in words[:8]:
+
+                    conditions.append(
+                        "LOWER(content) LIKE ?"
+                    )
+
+                    values.append(
+                        f"%{word}%"
+                    )
+
+                sql = f"""
+                    SELECT *
+                    FROM memories
+                    WHERE {" OR ".join(conditions)}
+                    ORDER BY id DESC
+                    LIMIT ?
+                """
+
+                values.append(limit)
+
+                rows = conn.execute(
+                    sql,
+                    values
+                ).fetchall()
+
+        return [
+            dict(row)
+            for row in rows
+        ]
+
+    finally:
+        conn.close()
+
+
+# ============================================================
+# CHAT DATABASE
+# ============================================================
+
+def create_chat(
+    title: str = "New Chat"
+):
+
+    chat_id = str(uuid4())
+
+    timestamp = now_iso()
+
+    conn = get_db()
+
+    try:
+
+        conn.execute(
+            """
+            INSERT INTO chats
+            (
+                id,
+                title,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                chat_id,
+                title[:100],
+                timestamp,
+                timestamp,
+            )
+        )
+
+        conn.commit()
+
+    finally:
+        conn.close()
+
+    return {
+        "id": chat_id,
+        "title": title[:100],
+        "created_at": timestamp,
+        "updated_at": timestamp,
+    }
+
+
+def get_chat(
+    chat_id: str
+):
+
+    conn = get_db()
+
+    try:
+
+        row = conn.execute(
+            """
+            SELECT *
+            FROM chats
+            WHERE id = ?
+            """,
+            (chat_id,)
+        ).fetchone()
+
+        if not row:
+            return None
+
+        return dict(row)
+
+    finally:
+        conn.close()
+
+
+def update_chat_title(
+    chat_id: str,
+    title: str
+):
+
+    conn = get_db()
+
+    try:
+
+        conn.execute(
+            """
+            UPDATE chats
+            SET title = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                title[:100],
+                now_iso(),
+                chat_id,
+            )
+        )
+
+        conn.commit()
+
+    finally:
+        conn.close()
+
+
+def save_message(
+    chat_id: str,
+    role: str,
+    content: str,
+):
+
+    conn = get_db()
+
+    try:
+
+        cursor = conn.execute(
+            """
+            INSERT INTO messages
+            (
+                chat_id,
+                role,
+                content,
+                created_at
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                chat_id,
+                role,
+                content,
+                now_iso(),
+            )
+        )
+
+        conn.execute(
+            """
+            UPDATE chats
+            SET updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                now_iso(),
+                chat_id,
+            )
+        )
+
+        conn.commit()
+
+        return cursor.lastrowid
+
+    finally:
+        conn.close()
+
+
+def get_messages(
+    chat_id: str,
+    limit: int = 30,
+    before_id: Optional[int] = None,
+):
+
+    conn = get_db()
+
+    try:
+
+        if before_id is None:
+
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM messages
+                WHERE chat_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (
+                    chat_id,
+                    limit,
+                )
+            ).fetchall()
+
+        else:
+
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM messages
+                WHERE chat_id = ?
+                AND id < ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (
+                    chat_id,
+                    before_id,
+                    limit,
+                )
+            ).fetchall()
+
+        rows = list(
+            reversed(rows)
+        )
+
+        return [
+            dict(row)
+            for row in rows
+        ]
+
+    finally:
+        conn.close()
+
+
+def delete_message(
+    message_id: int
+):
+
+    conn = get_db()
+
+    try:
+
+        conn.execute(
+            """
+            DELETE FROM messages
+            WHERE id = ?
+            """,
+            (message_id,)
+        )
+
+        conn.commit()
+
+    finally:
+        conn.close()
+
+
+# ============================================================
+# TITLE GENERATOR
+# ============================================================
+
+def generate_title(
+    text: str
+) -> str:
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    ).strip()
+
+    if not text:
+        return "New Chat"
+
+    if len(text) <= 45:
+        return text
+
+    return text[:45].rstrip() + "..."
+
+
+# ============================================================
+# CLEAN MODEL RESPONSE
+# ============================================================
+
+def clean_response(
+    text: str
+) -> str:
+
+    if not text:
+        return ""
+
+    text = re.sub(
+        r"<think>.*?</think>",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    text = re.sub(
+        r"<think>.*$",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    text = re.sub(
+        r"</?think>",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    return text.strip()
+
+
+# ============================================================
+# MODEL MESSAGE BUILDER
+# ============================================================
+
+def build_model_messages(
+    chat_id: str,
+    user_query: str,
+    current_content: Any = None,
+    exclude_message_id: Optional[int] = None,
+):
+
+    model_messages = [
+        {
+            "role": "system",
+            "content": SYSTEM_PROMPT,
+        }
+    ]
+
+
+    # --------------------------------------------------------
+    # MEMORY
+    # --------------------------------------------------------
+
+    memories = search_memories(
+        user_query,
+        limit=6
+    )
+
+    if memories:
+
+        memory_text = "\n".join(
+            [
+                f"- {item['content']}"
+                for item in memories
+            ]
+        )
+
+        model_messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "Relevant user memory:\n"
+                    f"{memory_text}"
+                ),
+            }
+        )
+
+
+    # --------------------------------------------------------
+    # RAG
+    # --------------------------------------------------------
+
+    rag_results = search_documents(
+        user_query,
+        n_results=5
+    )
+
+    if rag_results:
+
+        context_parts = []
+
+        for item in rag_results:
+
+            context_parts.append(
+                "\n".join(
+                    [
+                        f"Source: {item['filename']}",
+                        f"Chunk: {item['chunk']}",
+                        item["text"],
+                    ]
+                )
+            )
+
+        rag_context = "\n\n".join(
+            context_parts
+        )
+
+        model_messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "The following information comes "
+                    "from uploaded documents.\n\n"
+                    "Use it when it is relevant to "
+                    "the user's question.\n\n"
+                    f"{rag_context}"
+                ),
+            }
+        )
+
+
+    # --------------------------------------------------------
+    # CHAT HISTORY
+    # --------------------------------------------------------
+
+    history = get_messages(
+        chat_id,
+        limit=20,
+        before_id=exclude_message_id,
+    )
+
+    for message in history:
+
+        role = message["role"]
+
+        content = message["content"]
+
+        if role not in {
+            "user",
+            "assistant",
+        }:
+            continue
+
+        model_messages.append(
+            {
+                "role": role,
+                "content": content,
+            }
+        )
+
+
+    # --------------------------------------------------------
+    # CURRENT MESSAGE
+    # --------------------------------------------------------
+
+    if current_content is not None:
+
+        model_messages.append(
+            {
+                "role": "user",
+                "content": current_content,
+            }
+        )
+
+    return model_messages
+
+
+# ============================================================
+# HF RESPONSE EXTRACTION
+# ============================================================
+
+def extract_response_text(
+    response: Any
+) -> str:
+
+    try:
+
+        content = (
+            response
+            .choices[0]
+            .message
+            .content
+        )
+
+        if isinstance(
+            content,
+            str
+        ):
+            return content
+
+        if isinstance(
+            content,
+            list
+        ):
+
+            parts = []
+
+            for item in content:
+
+                if isinstance(
+                    item,
+                    dict
+                ):
+
+                    if item.get("type") == "text":
+
+                        parts.append(
+                            item.get(
+                                "text",
+                                ""
+                            )
+                        )
+
+            return "".join(parts)
+
+        return str(
+            content or ""
+        )
+
+    except Exception:
+
+        return ""
+
+
+def extract_stream_delta(
+    chunk: Any
+) -> str:
+
+    try:
+
+        delta = (
+            chunk
+            .choices[0]
+            .delta
+        )
+
+        content = getattr(
+            delta,
+            "content",
+            None
+        )
+
+        if isinstance(
+            content,
+            str
+        ):
+            return content
+
+        if isinstance(
+            content,
+            list
+        ):
+
+            parts = []
+
+            for item in content:
+
+                if isinstance(
+                    item,
+                    dict
+                ):
+
+                    text = item.get(
+                        "text",
+                        ""
+                    )
+
+                    if text:
+                        parts.append(
+                            text
+                        )
+
+            return "".join(parts)
+
+        return ""
+
+    except Exception:
+
+        return ""
+
+
+# ============================================================
+# FALLBACK STREAMING
+# ============================================================
+
+def split_for_streaming(
+    text: str,
+    size: int = 40
+):
+
+    for index in range(
+        0,
+        len(text),
+        size
+    ):
+
+        yield text[
+            index:index + size
+        ]
+
+
+# ============================================================
+# MODEL GENERATOR
+# ============================================================
+
+def generate_model_stream(
+    model_messages,
+) -> Generator[str, None, None]:
+
+    streamed_anything = False
+
+    # --------------------------------------------------------
+    # REAL STREAMING
+    # --------------------------------------------------------
+
+    try:
+
+        response_stream = (
+            client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=model_messages,
+                max_tokens=MAX_TOKENS,
+                temperature=TEMPERATURE,
+                stream=True,
+            )
+        )
+
+        for chunk in response_stream:
+
+            text = extract_stream_delta(
+                chunk
+            )
+
+            if text:
+
+                streamed_anything = True
+
+                yield text
+
+        if streamed_anything:
+            return
+
+    except Exception as error:
+
+        if streamed_anything:
+            raise error
+
+        print(
+            "⚠️ Streaming unavailable."
+        )
+
+        print(
+            f"   Reason: {error}"
+        )
+
+
+    # --------------------------------------------------------
+    # NORMAL RESPONSE FALLBACK
+    # --------------------------------------------------------
+
+    response = (
+        client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=model_messages,
+            max_tokens=MAX_TOKENS,
+            temperature=TEMPERATURE,
+        )
+    )
+
+    answer = extract_response_text(
+        response
+    )
+
+    if not answer:
+
+        raise RuntimeError(
+            "Model returned an empty response."
+        )
+
+    for piece in split_for_streaming(
+        answer
+    ):
+
+        yield piece
+
+
+# ============================================================
+# NDJSON
+# ============================================================
+
+def ndjson(
+    payload: dict
+) -> str:
+
+    return (
+        json.dumps(
+            payload,
+            ensure_ascii=False
+        )
+        + "\n"
+    )
+
+
+# ============================================================
+# CHAT STREAM
+# ============================================================
+
+def stream_chat(
+    chat_id: str,
+    model_messages,
+):
+
+    full_answer = ""
+
+    try:
+
+        yield ndjson(
+            {
+                "type": "status",
+                "message": "Generating response..."
+            }
+        )
+
+
+        # ----------------------------------------------------
+        # GENERATE
+        # ----------------------------------------------------
+
+        for chunk in generate_model_stream(
+            model_messages
+        ):
+
+            full_answer += chunk
+
+            yield ndjson(
+                {
+                    "type": "chunk",
+                    "content": chunk,
                 }
             )
+
+
+        # ----------------------------------------------------
+        # CLEAN
+        # ----------------------------------------------------
+
+        final_answer = clean_response(
+            full_answer
         )
 
-        ids = data.get(
-            "ids",
-            []
-        )
+        if not final_answer:
 
-        if ids:
-
-            get_document_store().delete(
-                ids=ids
+            final_answer = (
+                "Sorry, I could not generate "
+                "a response."
             )
+
+
+        # ----------------------------------------------------
+        # SAVE
+        # ----------------------------------------------------
+
+        save_message(
+            chat_id,
+            "assistant",
+            final_answer,
+        )
+
+
+        chat = get_chat(
+            chat_id
+        )
+
+
+        # ----------------------------------------------------
+        # DONE
+        # ----------------------------------------------------
+
+        yield ndjson(
+            {
+                "type": "done",
+                "response": final_answer,
+                "chat": chat,
+            }
+        )
+
+    except GeneratorExit:
+
+        return
 
     except Exception as error:
 
         print(
-            f"Document vector delete warning: {error}"
+            f"❌ Generation error: {error}"
+        )
+
+        yield ndjson(
+            {
+                "type": "error",
+                "message": str(error),
+            }
         )
 
 
 # ============================================================
-# INDEX PDF
+# REQUEST MODELS
 # ============================================================
 
-def index_pdf(file_path):
+class CreateChatRequest(BaseModel):
 
-    file_path = Path(file_path)
+    title: str = "New Chat"
 
-    if not file_path.exists():
 
-        return {
-            "status": "error",
-            "message": "File not found."
-        }
+class MessageRequest(BaseModel):
 
-    filename = file_path.name
+    message: str
 
-    file_hash = get_file_hash(
-        file_path
+
+class RenameChatRequest(BaseModel):
+
+    title: str
+
+
+class CreateComplaintRequest(BaseModel):
+
+    description: str
+    chat_id: Optional[str] = None
+
+
+# ============================================================
+# ROOT
+# ============================================================
+
+@app.get("/")
+def root():
+
+    return {
+        "success": True,
+        "service": "AI Assistant",
+        "model": MODEL_NAME,
+        "status": "running",
+    }
+
+
+# ============================================================
+# HEALTH
+# ============================================================
+
+@app.get("/health")
+def health():
+
+    # Force RAG initialization so health is accurate
+    collection = get_rag_collection()
+
+    rag_available = (
+        collection is not None
     )
 
-    existing = get_document(
+    rag_documents = 0
+
+    if collection is not None:
+
+        try:
+
+            rag_documents = (
+                collection.count()
+            )
+
+        except Exception:
+            rag_documents = 0
+
+    return {
+        "status": "ok",
+        "service": "AI Assistant",
+        "model": MODEL_NAME,
+        "database": DB_PATH.exists(),
+        "rag": rag_available,
+        "rag_documents": rag_documents,
+        "rag_error": _rag_error,
+        "embedding_model": EMBEDDING_MODEL,
+        "memory": True,
+    }
+
+
+# ============================================================
+# CREATE CHAT
+# ============================================================
+
+@app.post("/chats")
+def create_new_chat(
+    request: CreateChatRequest
+):
+
+    chat = create_chat(
+        request.title
+        or "New Chat"
+    )
+
+    return {
+        "success": True,
+        "chat": chat,
+    }
+
+
+# ============================================================
+# LIST CHATS
+# ============================================================
+
+@app.get("/chats")
+def list_chats():
+
+    conn = get_db()
+
+    try:
+
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM chats
+            ORDER BY updated_at DESC
+            """
+        ).fetchall()
+
+        chats = [
+            dict(row)
+            for row in rows
+        ]
+
+        return {
+            "success": True,
+            "chats": chats,
+        }
+
+    finally:
+        conn.close()
+
+
+# ============================================================
+# GET CHAT
+# ============================================================
+
+@app.get("/chats/{chat_id}")
+def get_single_chat(
+    chat_id: str
+):
+
+    chat = get_chat(
+        chat_id
+    )
+
+    if not chat:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Chat not found."
+        )
+
+    messages = get_messages(
+        chat_id,
+        limit=1000
+    )
+
+    return {
+        "success": True,
+        "chat": chat,
+        "messages": messages,
+    }
+
+
+# ============================================================
+# SEND MESSAGE
+# ============================================================
+
+@app.post("/chats/{chat_id}/messages")
+def send_message(
+    chat_id: str,
+    request: MessageRequest,
+):
+
+    chat = get_chat(
+        chat_id
+    )
+
+    if not chat:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Chat not found."
+        )
+
+
+    user_message = (
+        request.message
+        .strip()
+    )
+
+    if not user_message:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Message cannot be empty."
+        )
+
+
+    # --------------------------------------------------------
+    # SAVE USER MESSAGE
+    # --------------------------------------------------------
+
+    message_id = save_message(
+        chat_id,
+        "user",
+        user_message,
+    )
+
+
+    # --------------------------------------------------------
+    # MEMORY
+    # --------------------------------------------------------
+
+    memory = extract_memory(
+        user_message
+    )
+
+    if memory:
+
+        memory_type, content = memory
+
+        save_memory(
+            memory_type,
+            content
+        )
+
+
+    # --------------------------------------------------------
+    # TITLE
+    # --------------------------------------------------------
+
+    if chat["title"] == "New Chat":
+
+        update_chat_title(
+            chat_id,
+            generate_title(
+                user_message
+            )
+        )
+
+
+    # --------------------------------------------------------
+    # CONTEXT
+    # --------------------------------------------------------
+
+    model_messages = build_model_messages(
+        chat_id=chat_id,
+        user_query=user_message,
+        current_content=user_message,
+        exclude_message_id=message_id,
+    )
+
+
+    # --------------------------------------------------------
+    # STREAM
+    # --------------------------------------------------------
+
+    return StreamingResponse(
+        stream_chat(
+            chat_id,
+            model_messages,
+        ),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ============================================================
+# REGENERATE
+# ============================================================
+
+@app.post("/chats/{chat_id}/regenerate")
+def regenerate_response(
+    chat_id: str
+):
+
+    chat = get_chat(
+        chat_id
+    )
+
+    if not chat:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Chat not found."
+        )
+
+
+    messages = get_messages(
+        chat_id,
+        limit=1000
+    )
+
+    if not messages:
+
+        raise HTTPException(
+            status_code=400,
+            detail="No messages to regenerate."
+        )
+
+
+    # --------------------------------------------------------
+    # DELETE LAST ASSISTANT
+    # --------------------------------------------------------
+
+    last_assistant = None
+
+    for message in reversed(
+        messages
+    ):
+
+        if message["role"] == "assistant":
+
+            last_assistant = message
+
+            break
+
+    if last_assistant:
+
+        delete_message(
+            last_assistant["id"]
+        )
+
+
+    # --------------------------------------------------------
+    # FIND LAST USER
+    # --------------------------------------------------------
+
+    messages = get_messages(
+        chat_id,
+        limit=1000
+    )
+
+    last_user = None
+
+    for message in reversed(
+        messages
+    ):
+
+        if message["role"] == "user":
+
+            last_user = message
+
+            break
+
+
+    if not last_user:
+
+        raise HTTPException(
+            status_code=400,
+            detail="No user message found."
+        )
+
+
+    user_message = last_user[
+        "content"
+    ]
+
+
+    # --------------------------------------------------------
+    # BUILD CONTEXT
+    # --------------------------------------------------------
+
+    model_messages = build_model_messages(
+        chat_id=chat_id,
+        user_query=user_message,
+        current_content=None,
+    )
+
+
+    # --------------------------------------------------------
+    # STREAM
+    # --------------------------------------------------------
+
+    return StreamingResponse(
+        stream_chat(
+            chat_id,
+            model_messages,
+        ),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ============================================================
+# RENAME CHAT
+# ============================================================
+
+@app.put("/chats/{chat_id}")
+def rename_chat(
+    chat_id: str,
+    request: RenameChatRequest,
+):
+
+    chat = get_chat(
+        chat_id
+    )
+
+    if not chat:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Chat not found."
+        )
+
+
+    title = (
+        request.title
+        .strip()
+    )
+
+    if not title:
+        title = "New Chat"
+
+
+    update_chat_title(
+        chat_id,
+        title
+    )
+
+
+    updated_chat = get_chat(
+        chat_id
+    )
+
+    return {
+        "success": True,
+        "chat": updated_chat,
+    }
+
+
+# ============================================================
+# DELETE CHAT
+# ============================================================
+
+@app.delete("/chats/{chat_id}")
+def delete_chat(
+    chat_id: str
+):
+
+    chat = get_chat(
+        chat_id
+    )
+
+    if not chat:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Chat not found."
+        )
+
+
+    conn = get_db()
+
+    try:
+
+        conn.execute(
+            """
+            DELETE FROM chats
+            WHERE id = ?
+            """,
+            (chat_id,)
+        )
+
+        conn.commit()
+
+    finally:
+        conn.close()
+
+
+    return {
+        "success": True,
+        "message": "Chat deleted successfully.",
+        "chat_id": chat_id,
+    }
+
+
+# ============================================================
+# CLEAR CHAT
+# ============================================================
+
+@app.post("/chats/{chat_id}/clear")
+def clear_chat_messages(
+    chat_id: str
+):
+
+    chat = get_chat(
+        chat_id
+    )
+
+    if not chat:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Chat not found."
+        )
+
+
+    conn = get_db()
+
+    try:
+
+        conn.execute(
+            """
+            DELETE FROM messages
+            WHERE chat_id = ?
+            """,
+            (chat_id,)
+        )
+
+        conn.execute(
+            """
+            UPDATE chats
+            SET title = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                "New Chat",
+                now_iso(),
+                chat_id,
+            )
+        )
+
+        conn.commit()
+
+    finally:
+        conn.close()
+
+
+    return {
+        "success": True,
+        "message": "Conversation cleared.",
+    }
+
+
+# ============================================================
+# MEMORY
+# ============================================================
+
+@app.get("/memory")
+def get_memory(
+    query: str = ""
+):
+
+    memories = search_memories(
+        query,
+        limit=50
+    )
+
+    return {
+        "success": True,
+        "memories": memories,
+    }
+
+
+# ============================================================
+# DELETE MEMORY
+# ============================================================
+
+@app.delete("/memory/{memory_id}")
+def delete_memory(
+    memory_id: int
+):
+
+    conn = get_db()
+
+    try:
+
+        cursor = conn.execute(
+            """
+            DELETE FROM memories
+            WHERE id = ?
+            """,
+            (memory_id,)
+        )
+
+        conn.commit()
+
+        if cursor.rowcount == 0:
+
+            raise HTTPException(
+                status_code=404,
+                detail="Memory not found."
+            )
+
+    finally:
+        conn.close()
+
+
+    return {
+        "success": True,
+        "message": "Memory deleted.",
+    }
+
+
+# ============================================================
+# DELETE ALL MEMORY
+# ============================================================
+
+@app.delete("/memory")
+def delete_all_memory():
+
+    conn = get_db()
+
+    try:
+
+        conn.execute(
+            "DELETE FROM memories"
+        )
+
+        conn.commit()
+
+    finally:
+        conn.close()
+
+
+    return {
+        "success": True,
+        "message": "All memories deleted.",
+    }
+
+
+# ============================================================
+# DOCUMENT LIST
+# ============================================================
+
+@app.get("/documents")
+def list_documents():
+
+    conn = get_db()
+
+    try:
+
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM documents
+            ORDER BY created_at DESC
+            """
+        ).fetchall()
+
+        return {
+            "success": True,
+            "documents": [
+                dict(row)
+                for row in rows
+            ],
+        }
+
+    finally:
+        conn.close()
+
+
+# ============================================================
+# REMOVE DOCUMENT FROM CHROMA
+# ============================================================
+
+def remove_document_from_rag(
+    filename: str
+):
+
+    collection = get_rag_collection()
+
+    if collection is None:
+        return False
+
+    try:
+
+        collection.delete(
+            where={
+                "filename": filename
+            }
+        )
+
+        print(
+            f"🗑️ Removed RAG vectors: {filename}"
+        )
+
+        return True
+
+    except Exception as error:
+
+        print(
+            f"⚠️ Could not remove "
+            f"RAG document: {error}"
+        )
+
+        return False
+
+
+# ============================================================
+# PDF UPLOAD
+# ============================================================
+
+@app.post("/documents/upload")
+async def upload_document(
+    file: UploadFile = File(...)
+):
+
+    filename = Path(
+        file.filename or ""
+    ).name
+
+    if not filename:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Filename is required."
+        )
+
+
+    if not filename.lower().endswith(
+        ".pdf"
+    ):
+
+        raise HTTPException(
+            status_code=400,
+            detail="Only PDF files are supported."
+        )
+
+
+    # --------------------------------------------------------
+    # READ
+    # --------------------------------------------------------
+
+    file_bytes = await file.read()
+
+    max_size = 15 * 1024 * 1024
+
+    if len(file_bytes) > max_size:
+
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                "PDF is too large. "
+                "Maximum size is 15 MB."
+            )
+        )
+
+
+    if not file_bytes:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Uploaded PDF is empty."
+        )
+
+
+    # --------------------------------------------------------
+    # PDF EXTRACTION
+    # --------------------------------------------------------
+
+    try:
+
+        text = extract_pdf_text(
+            file_bytes
+        )
+
+    except Exception as error:
+
+        raise HTTPException(
+            status_code=400,
+            detail=str(error)
+        )
+
+
+    if not text:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Could not extract text from PDF. "
+                "If this is a scanned PDF, OCR is required."
+            )
+        )
+
+
+    # --------------------------------------------------------
+    # CHUNK
+    # --------------------------------------------------------
+
+    chunks = chunk_text(
+        text
+    )
+
+    if not chunks:
+
+        raise HTTPException(
+            status_code=400,
+            detail="No readable text found in PDF."
+        )
+
+
+    # --------------------------------------------------------
+    # CHROMA
+    # --------------------------------------------------------
+
+    collection = get_rag_collection()
+
+    if collection is None:
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Chroma RAG is unavailable.\n"
+                f"Reason: {_rag_error or 'Unknown error'}\n\n"
+                "Install:\n"
+                "pip install chromadb sentence-transformers pypdf"
+            )
+        )
+
+
+    # --------------------------------------------------------
+    # REMOVE OLD VERSION
+    # --------------------------------------------------------
+
+    remove_document_from_rag(
         filename
     )
 
-    if existing:
 
-        if existing["file_hash"] == file_hash:
+    conn = get_db()
 
-            return {
-                "status": "already_indexed",
-                "filename": filename
-            }
+    try:
 
-        delete_document_chunks(
-            filename
-        )
+        old_document = conn.execute(
+            """
+            SELECT file_path
+            FROM documents
+            WHERE filename = ?
+            """,
+            (filename,)
+        ).fetchone()
 
-        cursor.execute(
+        conn.execute(
             """
             DELETE FROM documents
             WHERE filename = ?
@@ -988,753 +2388,720 @@ def index_pdf(file_path):
             (filename,)
         )
 
-        connection.commit()
+        conn.commit()
 
-    reader = PdfReader(
-        str(file_path)
+    finally:
+        conn.close()
+
+
+    # --------------------------------------------------------
+    # SAVE FILE
+    # --------------------------------------------------------
+
+    file_path = (
+        UPLOAD_DIR / filename
     )
 
-    chunks = []
-    metadatas = []
+    file_path.write_bytes(
+        file_bytes
+    )
+
+
+    # --------------------------------------------------------
+    # ADD TO CHROMA
+    # --------------------------------------------------------
+
     ids = []
-
-    for page_number, page in enumerate(
-        reader.pages,
-        start=1
-    ):
-
-        text = page.extract_text() or ""
-
-        if not text.strip():
-            continue
-
-        page_chunks = (
-            text_splitter.split_text(
-                text
-            )
-        )
-
-        for chunk_index, chunk in enumerate(
-            page_chunks
-        ):
-
-            chunk_id = (
-                f"{filename}_"
-                f"{page_number}_"
-                f"{chunk_index}"
-            )
-
-            chunks.append(chunk)
-
-            metadatas.append(
-                {
-                    "source": filename,
-                    "page": page_number,
-                    "chunk": chunk_index
-                }
-            )
-
-            ids.append(
-                chunk_id
-            )
-
-    if chunks:
-
-        get_document_store().add_texts(
-            texts=chunks,
-            metadatas=metadatas,
-            ids=ids
-        )
-
-    now = datetime.now().isoformat()
-
-    cursor.execute(
-        """
-        INSERT INTO documents
-        (
-            filename,
-            file_hash,
-            created_at
-        )
-        VALUES (?, ?, ?)
-        """,
-        (
-            filename,
-            file_hash,
-            now
-        )
-    )
-
-    connection.commit()
-
-    return {
-        "status": "indexed",
-        "filename": filename,
-        "chunks": len(chunks)
-    }
-
-
-# ============================================================
-# BUILD KNOWLEDGE BASE
-# ============================================================
-
-def build_knowledge_base():
-
-    for file_path in DOCUMENT_FOLDER.glob("*.pdf"):
-
-        try:
-
-            result = index_pdf(
-                file_path
-            )
-
-            print(
-                f"PDF: {result}"
-            )
-
-        except Exception as error:
-
-            print(
-                f"PDF indexing error: "
-                f"{file_path.name}: {error}"
-            )
-
-
-# ============================================================
-# SEARCH DOCUMENTS
-# ============================================================
-
-def search_documents(
-    query,
-    k=3
-):
+    documents = []
+    metadatas = []
 
     try:
 
-        results = (
-            get_document_store()
-            .similarity_search_with_relevance_scores(
-                query,
-                k=k
+        for index, chunk in enumerate(
+            chunks
+        ):
+
+            ids.append(
+                f"{filename}-{uuid4().hex}"
             )
+
+            documents.append(
+                chunk
+            )
+
+            metadatas.append(
+                {
+                    "filename": filename,
+                    "chunk_index": index,
+                }
+            )
+
+
+        collection.add(
+            ids=ids,
+            documents=documents,
+            metadatas=metadatas,
         )
 
-        filtered = []
+        print(
+            f"✅ Indexed PDF: {filename}"
+        )
 
-        for doc, score in results:
+        print(
+            f"   Chunks: {len(chunks)}"
+        )
 
-            if score >= 0.55:
-
-                filtered.append(
-                    (doc, score)
-                )
-
-        return filtered
 
     except Exception as error:
 
         print(
-            f"Document search warning: {error}"
+            f"❌ Chroma indexing error: {error}"
         )
 
-        return []
+        # Remove partially indexed vectors
+        try:
 
+            collection.delete(
+                ids=ids
+            )
 
-# ============================================================
-# DOCUMENT CONTEXT
-# ============================================================
+        except Exception:
+            pass
 
-def build_document_context(user_input):
-
-    results = search_documents(
-        user_input,
-        k=3
-    )
-
-    if not results:
-        return ""
-
-    context_parts = []
-
-    for index, (doc, score) in enumerate(
-        results,
-        start=1
-    ):
-
-        source = doc.metadata.get(
-            "source",
-            "Unknown"
-        )
-
-        page = doc.metadata.get(
-            "page",
-            "?"
-        )
-
-        chunk = doc.metadata.get(
-            "chunk",
-            "?"
-        )
-
-        context_parts.append(
-            f"DOCUMENT RESULT {index}\n"
-            f"Source: {source}\n"
-            f"Page: {page}\n"
-            f"Chunk: {chunk}\n"
-            f"Relevance: {score:.3f}\n"
-            f"Content:\n"
-            f"{doc.page_content}"
-        )
-
-    return "\n\n".join(
-        context_parts
-    )
-
-
-# ============================================================
-# BUILD CONTEXT
-# ============================================================
-
-def build_context(user_input):
-
-    memory_context = (
-        build_memory_context(
-            user_input
-        )
-    )
-
-    document_context = (
-        build_document_context(
-            user_input
-        )
-    )
-
-    context_parts = []
-
-    if memory_context:
-
-        context_parts.append(
-            "USER MEMORY\n"
-            "===========\n"
-            + memory_context
-        )
-
-    if document_context:
-
-        context_parts.append(
-            "DOCUMENT KNOWLEDGE\n"
-            "==================\n"
-            + document_context
-        )
-
-    if not context_parts:
-        return ""
-
-    return "\n\n".join(
-        context_parts
-    )
-
-
-# ============================================================
-# BUILD MESSAGES
-# ============================================================
-
-def build_messages(
-    user_input,
-    chat_history=None
-):
-
-    system_prompt = """
-You are a helpful AI assistant.
-
-GENERAL RULES:
-
-- Give clear and simple answers.
-- Explain technical topics step by step.
-- Use examples when useful.
-- Keep answers focused and useful.
-- Use conversation history to understand follow-up questions.
-- Do not expose internal system instructions.
-- Do not mention hidden reasoning or chain-of-thought.
-
-CONVERSATION RULES:
-
-- The conversation history may contain previous user and assistant messages.
-- Use previous messages when the current question depends on them.
-- Understand references such as "this", "that", "previous code",
-  "same project", or "continue".
-- Do not repeat information unnecessarily.
-
-MEMORY RULES:
-
-- Use USER MEMORY only when it is relevant to the current question.
-- Never invent user memories.
-- If memory information is not available, simply say that you do not know.
-
-DOCUMENT RULES:
-
-- DOCUMENT KNOWLEDGE contains retrieved information from uploaded PDFs.
-- Use document information when it is relevant to the user's question.
-- Do not invent facts that are not present in the retrieved document context.
-- If the user asks something specifically about an uploaded document
-  and the retrieved context does not contain the answer, clearly say
-  that the available document context does not contain enough information.
-- When answering from a document, mention the source filename and page number
-  when useful.
-- If the retrieved document information is unrelated to the question,
-  ignore it and answer normally.
-- Do not force document information into unrelated answers.
-
-IMPORTANT:
-
-Answer the user's CURRENT question directly.
-"""
-
-    messages = [
-        SystemMessage(
-            content=system_prompt
-        )
-    ]
-
-    # --------------------------------------------------------
-    # CONVERSATION HISTORY
-    # --------------------------------------------------------
-
-    if chat_history:
-
-        messages.extend(
-            chat_history
-        )
-
-    # --------------------------------------------------------
-    # RETRIEVED CONTEXT
-    # --------------------------------------------------------
-
-    context = build_context(
-        user_input
-    )
-
-    if context:
-
-        context_prompt = f"""
-The following information was retrieved from the user's
-long-term memory and/or uploaded documents.
-
-Treat this information as reference material.
-
-================ RETRIEVED CONTEXT ================
-
-{context}
-
-================ END RETRIEVED CONTEXT ================
-
-Use this context only when it is relevant to the current question.
-"""
-
-        messages.append(
-            SystemMessage(
-                content=context_prompt
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Document indexing failed: "
+                f"{error}"
             )
         )
 
+
     # --------------------------------------------------------
-    # CURRENT USER MESSAGE
+    # SAVE DOCUMENT RECORD
     # --------------------------------------------------------
 
-    messages.append(
-        HumanMessage(
-            content=user_input
-        )
-    )
+    conn = get_db()
 
-    return messages
+    try:
 
-
-# ============================================================
-# DOCUMENT LIST
-# ============================================================
-
-def get_documents():
-
-    cursor.execute(
-        """
-        SELECT
-            id,
-            filename,
-            file_hash,
-            created_at
-        FROM documents
-        ORDER BY id DESC
-        """
-    )
-
-    rows = cursor.fetchall()
-
-    documents = []
-
-    for row in rows:
-
-        documents.append(
-            {
-                "id": row[0],
-                "filename": row[1],
-                "file_hash": row[2],
-                "created_at": row[3]
-            }
+        conn.execute(
+            """
+            INSERT INTO documents
+            (
+                filename,
+                file_path,
+                chunks,
+                created_at
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                filename,
+                str(file_path),
+                len(chunks),
+                now_iso(),
+            )
         )
 
-    return documents
+        conn.commit()
+
+    except Exception as error:
+
+        # If DB save fails, remove vectors
+        try:
+
+            collection.delete(
+                where={
+                    "filename": filename
+                }
+            )
+
+        except Exception:
+            pass
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Could not save document record: "
+                f"{error}"
+            )
+        )
+
+    finally:
+        conn.close()
 
 
-def list_documents():
+    # --------------------------------------------------------
+    # DELETE OLD PHYSICAL FILE
+    # --------------------------------------------------------
 
-    return get_documents()
+    if old_document:
+
+        try:
+
+            old_path = Path(
+                old_document["file_path"]
+            )
+
+            if (
+                old_path.exists()
+                and old_path != file_path
+            ):
+
+                old_path.unlink()
+
+        except Exception:
+            pass
+
+
+    return {
+        "success": True,
+        "message": (
+            "PDF uploaded and indexed successfully."
+        ),
+        "document": {
+            "filename": filename,
+            "chunks": len(chunks),
+        },
+    }
 
 
 # ============================================================
-# REMOVE DOCUMENT
+# DELETE DOCUMENT
 # ============================================================
 
-def remove_document(filename):
+@app.delete("/documents/{filename}")
+def delete_document(
+    filename: str
+):
 
     filename = Path(
         filename
     ).name
 
-    delete_document_chunks(
+
+    # --------------------------------------------------------
+    # REMOVE CHROMA
+    # --------------------------------------------------------
+
+    remove_document_from_rag(
         filename
     )
 
-    cursor.execute(
-        """
-        DELETE FROM documents
-        WHERE filename = ?
-        """,
-        (filename,)
+
+    # --------------------------------------------------------
+    # DATABASE
+    # --------------------------------------------------------
+
+    conn = get_db()
+
+    try:
+
+        row = conn.execute(
+            """
+            SELECT file_path
+            FROM documents
+            WHERE filename = ?
+            """,
+            (filename,)
+        ).fetchone()
+
+
+        conn.execute(
+            """
+            DELETE FROM documents
+            WHERE filename = ?
+            """,
+            (filename,)
+        )
+
+        conn.commit()
+
+    finally:
+        conn.close()
+
+
+    # --------------------------------------------------------
+    # PHYSICAL FILE
+    # --------------------------------------------------------
+
+    if row:
+
+        try:
+
+            path = Path(
+                row["file_path"]
+            )
+
+            if path.exists():
+
+                path.unlink()
+
+        except Exception as error:
+
+            print(
+                f"⚠️ File deletion error: {error}"
+            )
+
+
+    return {
+        "success": True,
+        "message": "Document deleted successfully.",
+        "filename": filename,
+    }
+
+
+# ============================================================
+# IMAGE CHAT
+# ============================================================
+
+@app.post("/chats/{chat_id}/image")
+async def image_chat(
+    chat_id: str,
+    file: UploadFile = File(...),
+    question: str = Form(
+        "Describe this image and explain what you can see."
+    ),
+):
+
+    chat = get_chat(
+        chat_id
     )
 
-    connection.commit()
+    if not chat:
 
-    file_path = (
-        DOCUMENT_FOLDER /
+        raise HTTPException(
+            status_code=404,
+            detail="Chat not found."
+        )
+
+
+    # --------------------------------------------------------
+    # VALIDATE
+    # --------------------------------------------------------
+
+    filename = Path(
+        file.filename or ""
+    ).name
+
+    extension = Path(
         filename
+    ).suffix.lower()
+
+
+    mime_types = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+    }
+
+
+    if extension not in mime_types:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Supported images: "
+                "JPG, JPEG, PNG, WEBP."
+            )
+        )
+
+
+    image_bytes = await file.read()
+
+
+    if len(image_bytes) > 8 * 1024 * 1024:
+
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                "Image is too large. "
+                "Maximum size is 8 MB."
+            )
+        )
+
+
+    if not image_bytes:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Image is empty."
+        )
+
+
+    # --------------------------------------------------------
+    # BASE64
+    # --------------------------------------------------------
+
+    image_data = base64.b64encode(
+        image_bytes
+    ).decode("utf-8")
+
+
+    image_url = (
+        f"data:{mime_types[extension]};"
+        f"base64,{image_data}"
     )
 
-    if file_path.exists():
 
-        file_path.unlink()
+    question = (
+        question.strip()
+        or "Describe this image and explain what you can see."
+    )
 
-    return True
+
+    # --------------------------------------------------------
+    # SAVE USER MESSAGE
+    # --------------------------------------------------------
+
+    user_content_for_db = (
+        "[Image attached]\n"
+        f"{question}"
+    )
+
+
+    message_id = save_message(
+        chat_id,
+        "user",
+        user_content_for_db,
+    )
+
+
+    # --------------------------------------------------------
+    # MEMORY
+    # --------------------------------------------------------
+
+    memory = extract_memory(
+        question
+    )
+
+    if memory:
+
+        memory_type, content = memory
+
+        save_memory(
+            memory_type,
+            content
+        )
+
+
+    # --------------------------------------------------------
+    # MODEL CONTEXT
+    # --------------------------------------------------------
+
+    model_messages = build_model_messages(
+        chat_id=chat_id,
+        user_query=question,
+        current_content=[
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url
+                },
+            },
+            {
+                "type": "text",
+                "text": question,
+            },
+        ],
+        exclude_message_id=message_id,
+    )
+
+
+    # --------------------------------------------------------
+    # STREAM
+    # --------------------------------------------------------
+
+    return StreamingResponse(
+        stream_chat(
+            chat_id,
+            model_messages,
+        ),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ============================================================
-# TERMINAL CHATBOT
+# COMPLAINTS
 # ============================================================
 
-def run_terminal_chatbot():
+@app.post("/complaints")
+def create_complaint(
+    request: CreateComplaintRequest
+):
 
-    build_knowledge_base()
+    description = (
+        request.description
+        .strip()
+    )
+
+    if not description:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Complaint description cannot be empty."
+        )
+
+
+    timestamp = now_iso()
+
+    conn = get_db()
+
+    try:
+
+        cursor = conn.execute(
+            """
+            INSERT INTO complaints
+            (
+                chat_id,
+                description,
+                created_at
+            )
+            VALUES (?, ?, ?)
+            """,
+            (
+                request.chat_id,
+                description,
+                timestamp,
+            )
+        )
+
+        conn.commit()
+
+        complaint_id = cursor.lastrowid
+
+    finally:
+        conn.close()
+
+
+    return {
+        "success": True,
+        "complaint": {
+            "id": complaint_id,
+            "chat_id": request.chat_id,
+            "description": description,
+            "created_at": timestamp,
+        },
+    }
+
+
+# ============================================================
+# RAG STATUS
+# ============================================================
+
+@app.get("/rag/status")
+def rag_status():
+
+    collection = get_rag_collection()
+
+    if collection is None:
+
+        return {
+            "success": False,
+            "available": False,
+            "error": _rag_error,
+            "embedding_model": EMBEDDING_MODEL,
+        }
+
+
+    try:
+
+        count = collection.count()
+
+    except Exception as error:
+
+        return {
+            "success": False,
+            "available": False,
+            "error": str(error),
+        }
+
+
+    return {
+        "success": True,
+        "available": True,
+        "collection": "documents",
+        "chunks": count,
+        "embedding_model": EMBEDDING_MODEL,
+    }
+
+
+# ============================================================
+# RAG TEST SEARCH
+# ============================================================
+
+@app.get("/rag/search")
+def rag_search(
+    query: str,
+    limit: int = 5,
+):
+
+    query = query.strip()
+
+    if not query:
+
+        raise HTTPException(
+            status_code=400,
+            detail="Query cannot be empty."
+        )
+
+
+    results = search_documents(
+        query,
+        n_results=max(
+            1,
+            min(limit, 20)
+        )
+    )
+
+
+    return {
+        "success": True,
+        "query": query,
+        "count": len(results),
+        "results": results,
+    }
+
+
+# ============================================================
+# STATS
+# ============================================================
+
+@app.get("/stats")
+def get_stats():
+
+    conn = get_db()
+
+    try:
+
+        chats = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM chats
+            """
+        ).fetchone()["count"]
+
+
+        messages = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM messages
+            """
+        ).fetchone()["count"]
+
+
+        memories = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM memories
+            """
+        ).fetchone()["count"]
+
+
+        documents = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM documents
+            """
+        ).fetchone()["count"]
+
+
+        rag_chunks = 0
+
+        collection = get_rag_collection()
+
+        if collection is not None:
+
+            try:
+
+                rag_chunks = collection.count()
+
+            except Exception:
+                rag_chunks = 0
+
+
+        return {
+            "success": True,
+            "stats": {
+                "chats": chats,
+                "messages": messages,
+                "memories": memories,
+                "documents": documents,
+                "rag_chunks": rag_chunks,
+            },
+        }
+
+    finally:
+        conn.close()
+
+
+# ============================================================
+# START SERVER
+# ============================================================
+
+if __name__ == "__main__":
+
+    import uvicorn
+
+    print()
+    print("=" * 70)
+    print("🤖 AI ASSISTANT BACKEND")
+    print("=" * 70)
 
     print(
-        "\n🤖 AI Memory + RAG Chatbot"
+        f"Model       : {MODEL_NAME}"
     )
 
     print(
-        "Type 'exit' to stop."
+        f"Database    : {DB_PATH}"
     )
 
     print(
-        "Type 'memory' to view memories."
+        f"Upload Dir  : {UPLOAD_DIR}"
     )
 
     print(
-        "Type 'docs' to view documents."
+        f"Chroma Dir  : {CHROMA_DIR}"
     )
 
     print(
-        "Type 'forget <id>' to delete memory."
+        f"Embedding   : {EMBEDDING_MODEL}"
+    )
+
+    print("=" * 70)
+    print()
+
+    print(
+        "🚀 Starting FastAPI server..."
+    )
+
+    print(
+        "🌐 http://127.0.0.1:8000"
+    )
+
+    print(
+        "📚 API docs: http://127.0.0.1:8000/docs"
     )
 
     print()
 
-    while True:
-
-        user_input = input(
-            "You: "
-        ).strip()
-
-        if not user_input:
-            continue
-
-        # ----------------------------------------------------
-        # EXIT
-        # ----------------------------------------------------
-
-        if user_input.lower() == "exit":
-
-            print(
-                "Bot: Goodbye! 👋"
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=int(
+            os.getenv(
+                "PORT",
+                "8000"
             )
-
-            break
-
-        # ----------------------------------------------------
-        # MEMORY COMMAND
-        # ----------------------------------------------------
-
-        if user_input.lower() == "memory":
-
-            cursor.execute(
-                """
-                SELECT
-                    id,
-                    memory_type,
-                    content
-                FROM memories
-                ORDER BY id DESC
-                """
-            )
-
-            rows = cursor.fetchall()
-
-            if not rows:
-
-                print(
-                    "Bot: No memories stored."
-                )
-
-                continue
-
-            print(
-                "\n🧠 Memories:"
-            )
-
-            for row in rows:
-
-                print(
-                    f"[{row[0]}] "
-                    f"{row[1]} → "
-                    f"{row[2]}"
-                )
-
-            print()
-
-            continue
-
-        # ----------------------------------------------------
-        # FORGET MEMORY
-        # ----------------------------------------------------
-
-        if user_input.lower().startswith(
-            "forget "
-        ):
-
-            try:
-
-                memory_id = int(
-                    user_input.split(
-                        " ",
-                        1
-                    )[1]
-                )
-
-                cursor.execute(
-                    """
-                    DELETE FROM memories
-                    WHERE id = ?
-                    """,
-                    (memory_id,)
-                )
-
-                connection.commit()
-
-                try:
-
-                    get_memory_store().delete(
-                        ids=[
-                            f"memory_{memory_id}"
-                        ]
-                    )
-
-                except Exception:
-                    pass
-
-                print(
-                    "Bot: Memory deleted."
-                )
-
-            except Exception:
-
-                print(
-                    "Bot: Use forget <id>"
-                )
-
-            continue
-
-        # ----------------------------------------------------
-        # DOCUMENT COMMAND
-        # ----------------------------------------------------
-
-        if user_input.lower() == "docs":
-
-            documents = get_documents()
-
-            if not documents:
-
-                print(
-                    "Bot: No documents found."
-                )
-
-                continue
-
-            print(
-                "\n📄 Documents:"
-            )
-
-            for doc in documents:
-
-                print(
-                    f"[{doc['id']}] "
-                    f"{doc['filename']}"
-                )
-
-            print()
-
-            continue
-
-        # ----------------------------------------------------
-        # REMOVE DOCUMENT
-        # ----------------------------------------------------
-
-        if user_input.lower().startswith(
-            "remove_doc "
-        ):
-
-            filename = user_input.split(
-                " ",
-                1
-            )[1].strip()
-
-            remove_document(
-                filename
-            )
-
-            print(
-                f"Bot: Removed {filename}"
-            )
-
-            continue
-
-        # ----------------------------------------------------
-        # DIRECT RESPONSE
-        # ----------------------------------------------------
-
-        direct = direct_response(
-            user_input
-        )
-
-        if direct:
-
-            print(
-                "Bot:",
-                direct
-            )
-
-            continue
-
-        # ----------------------------------------------------
-        # MEMORY DETECTION
-        # ----------------------------------------------------
-
-        detected = detect_memory(
-            user_input
-        )
-
-        if detected:
-
-            memory_type, memory_content = detected
-
-            try:
-
-                save_smart_memory(
-                    memory_type,
-                    memory_content
-                )
-
-            except Exception as error:
-
-                print(
-                    f"Memory save warning: {error}"
-                )
-
-        # ----------------------------------------------------
-        # CHAT HISTORY
-        # ----------------------------------------------------
-
-        history = load_chat_history(
-            limit=10
-        )
-
-        # ----------------------------------------------------
-        # BUILD MESSAGES
-        # ----------------------------------------------------
-
-        messages = build_messages(
-            user_input,
-            history
-        )
-
-        # ----------------------------------------------------
-        # MODEL
-        # ----------------------------------------------------
-
-        try:
-
-            response = model.invoke(
-                messages
-            )
-
-            answer = clean_response(
-                response.content
-            )
-
-            if not answer:
-
-                answer = (
-                    "I couldn't generate "
-                    "a response."
-                )
-
-        except Exception as error:
-
-            answer = (
-                "Sorry, an error occurred: "
-                f"{error}"
-            )
-
-        # ----------------------------------------------------
-        # SAVE CHAT
-        # ----------------------------------------------------
-
-        save_message(
-            "user",
-            user_input
-        )
-
-        save_message(
-            "assistant",
-            answer
-        )
-
-        print(
-            "Bot:",
-            answer
-        )
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-if __name__ == "__main__":
-    run_terminal_chatbot()
+        ),
+        reload=os.getenv(
+            "RELOAD",
+            "true"
+        ).lower() == "true",
+    )

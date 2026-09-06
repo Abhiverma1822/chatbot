@@ -14,7 +14,6 @@
 
     <!-- =====================================================
          HIGHLIGHT.JS
-         Syntax Highlighting
     ====================================================== -->
 
     <link rel="stylesheet"
@@ -30,8 +29,8 @@
 
 
         <!-- =====================================================
-             SIDEBAR
-        ====================================================== -->
+         SIDEBAR
+    ====================================================== -->
 
         <aside class="sidebar">
 
@@ -51,7 +50,7 @@
                     </h2>
 
                     <span>
-                        Memory + RAG
+                        Memory + RAG + Vision
                     </span>
 
                 </div>
@@ -72,14 +71,15 @@
             </button>
 
 
-            <!-- Chat History -->
+            <!-- =================================================
+             CHAT HISTORY
+        ================================================== -->
 
             <div class="sidebar-section">
 
                 <h3>
                     💬 Conversations
                 </h3>
-
 
                 <div id="chatHistory" class="chat-history">
 
@@ -92,7 +92,9 @@
             </div>
 
 
-            <!-- Documents -->
+            <!-- =================================================
+             DOCUMENTS
+        ================================================== -->
 
             <div class="sidebar-section documents-section">
 
@@ -115,13 +117,14 @@
 
 
                 <div id="documentList" class="document-list">
-
                 </div>
 
             </div>
 
 
-            <!-- Features -->
+            <!-- =================================================
+             FEATURES
+        ================================================== -->
 
             <div class="sidebar-section features">
 
@@ -137,6 +140,11 @@
 
                 <p>
                     📚 PDF Knowledge
+                </p>
+
+
+                <p>
+                    🖼️ Image Understanding
                 </p>
 
 
@@ -161,7 +169,7 @@
                 </span>
 
                 <small>
-                    v1.0
+                    v2.0
                 </small>
 
             </div>
@@ -170,13 +178,15 @@
 
 
         <!-- =====================================================
-             MAIN CHAT
-        ====================================================== -->
+         MAIN CHAT
+    ====================================================== -->
 
         <main class="chat-container">
 
 
-            <!-- Header -->
+            <!-- =================================================
+             HEADER
+        ================================================== -->
 
             <header class="chat-header">
 
@@ -193,7 +203,6 @@
                         <h1>
                             AI Memory Assistant
                         </h1>
-
 
                         <span id="status">
                             ● Online
@@ -228,8 +237,8 @@
 
 
             <!-- =================================================
-                 CHAT MESSAGES
-            ================================================== -->
+             CHAT MESSAGES
+        ================================================== -->
 
             <div id="chatMessages" class="chat-messages">
 
@@ -251,8 +260,9 @@
 
                     <p>
                         I can remember information,
-                        answer questions and search
-                        your uploaded documents.
+                        answer questions, search your
+                        uploaded documents, and understand
+                        images.
                     </p>
 
 
@@ -281,6 +291,7 @@
 
                         </button>
 
+
                     </div>
 
                 </div>
@@ -289,14 +300,62 @@
 
 
             <!-- =================================================
-                 INPUT AREA
-            ================================================== -->
+             INPUT AREA
+        ================================================== -->
 
             <div class="input-wrapper">
 
 
+                <!-- =================================================
+                 IMAGE PREVIEW
+            ================================================== -->
+
+                <div id="imagePreviewContainer" class="image-preview-container hidden">
+
+
+                    <div class="image-preview-wrapper">
+
+
+                        <img id="imagePreview" class="image-preview" src="" alt="Selected image">
+
+
+                        <button id="removeImageBtn" class="remove-image-btn" type="button" title="Remove image">
+
+                            ✕
+
+                        </button>
+
+                    </div>
+
+
+                    <span id="imageName">
+                    </span>
+
+                </div>
+
+
+                <!-- =================================================
+                 INPUT AREA
+            ================================================== -->
+
                 <div class="input-area">
 
+
+                    <!-- Image Upload -->
+
+                    <button id="imageBtn" class="image-btn" type="button" title="Upload image">
+
+                        🖼️
+
+                    </button>
+
+
+                    <!-- Hidden Image Input -->
+
+                    <input type="file" id="imageInput" accept="image/*" hidden>
+
+
+                    <!-- Text Input -->
 
                     <textarea id="userInput" placeholder="Message AI Assistant..." rows="1"></textarea>
 
@@ -310,7 +369,7 @@
                     </button>
 
 
-                    <!-- Stop Generating -->
+                    <!-- Stop -->
 
                     <button id="stopBtn" class="stop-btn hidden" type="button" title="Stop generating">
 
@@ -321,7 +380,9 @@
                 </div>
 
 
-                <!-- Input Information -->
+                <!-- =================================================
+                 INPUT INFORMATION
+            ================================================== -->
 
                 <div class="input-info">
 
@@ -332,7 +393,7 @@
 
 
                     <span>
-                        Powered by DeepSeek-R1
+                        Powered by DeepSeek Vision
                     </span>
 
                 </div>
@@ -343,8 +404,8 @@
 
 
         <!-- =====================================================
-             MEMORY PANEL
-        ====================================================== -->
+         MEMORY PANEL
+    ====================================================== -->
 
         <aside id="memoryPanel" class="memory-panel hidden">
 
@@ -381,12 +442,13 @@
 
         </aside>
 
+
     </div>
 
 
     <!-- =========================================================
-         HIGHLIGHT.JS
-    ========================================================== -->
+     HIGHLIGHT.JS
+========================================================== -->
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js">
     </script>
@@ -429,8 +491,8 @@
 
 
     <!-- =========================================================
-         MAIN JAVASCRIPT
-    ========================================================== -->
+     MAIN JAVASCRIPT
+========================================================== -->
 
     <script src="script.js"></script>
 
